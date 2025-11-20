@@ -54,6 +54,7 @@ See Also:
 """
 import logging
 import uuid
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +63,10 @@ from typing import Dict
 
 from peer_manager import PeerConnectionManager
 from room_manager import RoomManager
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -198,6 +203,74 @@ async def get_rooms():
     return {"rooms": room_manager.get_room_list()}
 
 
+@app.get("/api/turn-credentials")
+async def get_turn_credentials():
+    """TURN 서버 credentials를 Frontend에 안전하게 제공합니다.
+
+    Metered.ca API를 통해 TURN 서버 credentials를 가져와 클라이언트에 전달합니다.
+    이 엔드포인트는 Backend에서 API key를 관리하여 Frontend에서 민감한 정보가
+    노출되지 않도록 합니다.
+
+    Returns:
+        dict: TURN 서버 ICE server 설정 리스트 또는 에러 메시지
+            - 성공 시: Metered.ca API 응답 (ICE servers 배열)
+            - 실패 시: {"error": "에러 메시지"}
+
+    Environment Variables:
+        METERED_API_KEY: Metered.ca API 인증 키
+
+    Security:
+        - API key는 Backend 환경 변수에서만 관리
+        - Frontend에 API key 노출 방지
+        - Metered.ca 공식 보안 권장사항 준수
+
+    Examples:
+        성공 응답:
+            [
+                {
+                    "urls": "turn:global.relay.metered.ca:80",
+                    "username": "...",
+                    "credential": "..."
+                },
+                ...
+            ]
+
+        에러 응답:
+            {"error": "TURN service not configured"}
+
+    See Also:
+        Metered.ca Docs: https://www.metered.ca/docs/turn-server-service/overview
+    """
+    import httpx
+    import os
+
+    metered_api_key = os.getenv("METERED_API_KEY")
+    if not metered_api_key:
+        logger.warning("METERED_API_KEY not set in environment")
+        return {"error": "TURN service not configured"}
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"https://my-dev-turnserver.metered.live/api/v1/turn/credentials?apiKey={metered_api_key}",
+                timeout=10.0
+            )
+
+            if response.status_code == 200:
+                logger.info("✅ TURN credentials fetched successfully from Metered.ca")
+                return response.json()
+            else:
+                logger.error(f"Failed to fetch TURN credentials: HTTP {response.status_code}")
+                return {"error": f"Failed to fetch TURN credentials: HTTP {response.status_code}"}
+
+    except httpx.TimeoutException:
+        logger.error("Timeout while fetching TURN credentials from Metered.ca")
+        return {"error": "TURN service timeout"}
+    except Exception as e:
+        logger.error(f"Error fetching TURN credentials: {e}")
+        return {"error": "Failed to fetch TURN credentials"}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebRTC 시그널링을 위한 WebSocket 엔드포인트.
@@ -299,6 +372,80 @@ async def websocket_endpoint(websocket: WebSocket):
         )
 
     peer_manager.on_track_received_callback = on_track_received
+    
+    # Register callback for ICE candidate
+    async def on_ice_candidate(source_peer_id: str, candidate):
+          # IMPORTANT: aiortc gives us the candidate object, we need to convert it
+          # The candidate string already has "candidate:" prefix, don't add it again
+
+          # DEBUG: Log the raw candidate object
+          logger.info(f"🔍 Raw candidate from aiortc: candidate={candidate.candidate}, sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
+
+          candidate_dict = {
+              "candidate": candidate.candidate,  # Already has "candidate:" prefix
+              "sdpMid": candidate.sdpMid,
+              "sdpMLineIndex": candidate.sdpMLineIndex
+          }
+
+          logger.info(f"📋 Converted candidate_dict: {candidate_dict}")
+
+          # Broadcast ICE candidate to ALL peers in the same room
+          room_name = peer_manager.get_peer_room(source_peer_id)
+          if room_name:
+              logger.info(f"📤 Broadcasting backend ICE candidate from {source_peer_id} to room '{room_name}'")
+              await room_manager.broadcast_to_room(
+                  room_name,
+                  {
+                      "type": "ice_candidate",
+                      "data": candidate_dict
+                  },
+                  exclude=[]  # Send to ALL peers (including source)
+              )
+          else:
+              # Fallback: Send to source peer only if room not found
+              logger.warning(f"⚠️ Room not found for peer {source_peer_id}, sending ICE candidate to source only")
+              await websocket.send_json({"type": "ice_candidate", "data": candidate_dict})
+
+    peer_manager.on_ice_candidate_callback = on_ice_candidate
+
+    # Register callback for STT transcript
+    async def on_transcript(peer_id: str, room_name: str, transcript: str):
+        """STT 인식 결과를 WebSocket을 통해 전송하는 콜백 함수.
+
+        Args:
+            peer_id (str): 음성을 전송한 피어의 ID
+            room_name (str): 피어가 속한 룸 이름
+            transcript (str): 인식된 텍스트
+
+        Note:
+            - 같은 룸의 모든 피어에게 브로드캐스트
+            - 메시지 형식: {"type": "transcript", "data": {...}}
+        """
+        logger.info(f"💬 Transcript from {peer_id} in room '{room_name}': {transcript}")
+
+        # Get peer nickname
+        peer_info = room_manager.get_peer(peer_id)
+        nickname = peer_info.nickname if peer_info else "Unknown"
+
+        # Save transcript to room history
+        import time
+        room_manager.add_transcript(peer_id, room_name, transcript, timestamp=time.time())
+
+        # Broadcast transcript to all peers in room
+        await broadcast_to_room(
+            room_name,
+            {
+                "type": "transcript",
+                "data": {
+                    "peer_id": peer_id,
+                    "nickname": nickname,
+                    "text": transcript,
+                    "timestamp": time.time()
+                }
+            }
+        )
+
+    peer_manager.on_transcript_callback = on_transcript
 
     try:
         while True:
@@ -407,7 +554,40 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 candidate_data = data.get("data")
-                logger.info(f"Received ICE candidate from {peer_id}")
+                logger.info(f"Received ICE candidate from {peer_id[:8]}")
+
+                # Add ICE candidate to this peer's connection
+                pc = peer_manager.get_peer_connection(peer_id)
+                if pc and candidate_data:
+                    try:
+                        from aiortc.sdp import candidate_from_sdp
+
+                        # Unwrap nested structure: {candidate: {candidate: "...", sdpMid: ...}}
+                        inner_candidate = candidate_data.get("candidate", {})
+                        if isinstance(inner_candidate, dict):
+                            candidate_str = inner_candidate.get("candidate", "")
+                            sdp_mid = inner_candidate.get("sdpMid")
+                            sdp_mline_index = inner_candidate.get("sdpMLineIndex")
+                        else:
+                            # Fallback: if not nested, use directly
+                            candidate_str = candidate_data.get("candidate", "")
+                            sdp_mid = candidate_data.get("sdpMid")
+                            sdp_mline_index = candidate_data.get("sdpMLineIndex")
+
+                        # Remove "candidate:" prefix if present
+                        if candidate_str.startswith("candidate:"):
+                            candidate_str = candidate_str[10:]  # len("candidate:")
+
+                        # Parse SDP candidate string to RTCIceCandidate
+                        ice_candidate = candidate_from_sdp(candidate_str)
+                        ice_candidate.sdpMid = sdp_mid
+                        ice_candidate.sdpMLineIndex = sdp_mline_index
+
+                        # Add to peer connection
+                        await pc.addIceCandidate(ice_candidate)
+                        logger.info(f"  ✅ Added client ICE candidate to peer {peer_id[:8]}")
+                    except Exception as e:
+                        logger.error(f"  ❌ Failed to add ICE candidate: {e}")
 
                 # Broadcast ICE candidate to other peers in the room
                 await broadcast_to_room(

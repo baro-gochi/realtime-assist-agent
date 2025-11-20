@@ -120,6 +120,7 @@ export class WebRTCClient {
     this.localStream = null;
     this.remoteStream = new MediaStream();
     this.needsRenegotiation = false; // 재협상 필요 여부 플래그
+    this.turnServers = null; // Cached TURN credentials
 
     // Event callbacks (이벤트가 발생했을 때 실행할 함수들)
     this.onPeerId = null;
@@ -129,6 +130,40 @@ export class WebRTCClient {
     this.onRemoteStream = null;
     this.onConnectionStateChange = null;
     this.onError = null;
+    this.onTranscript = null; // STT transcript 이벤트 콜백
+
+    // Prefetch TURN credentials on construction
+    this.prefetchTurnCredentials();
+  }
+
+  /**
+   * Prefetch TURN credentials in the background
+   *
+   * @async
+   * @description
+   * Fetches TURN server credentials from backend and caches them.
+   * This runs in background to avoid blocking createPeerConnection().
+   */
+  async prefetchTurnCredentials() {
+    try {
+      const backendUrl = `${window.location.protocol}//${window.location.host}/api/turn-credentials`;
+      console.log('🔄 Prefetching TURN credentials from:', backendUrl);
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+      const response = await fetch(backendUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
+
+      if (response.ok) {
+        this.turnServers = await response.json();
+        console.log('✅ TURN credentials prefetched successfully');
+      } else {
+        console.warn('⚠️ Failed to prefetch TURN credentials, will use STUN only');
+      }
+    } catch (error) {
+      console.warn('⚠️ Error prefetching TURN credentials:', error.message);
+    }
   }
 
   /**
@@ -277,11 +312,21 @@ export class WebRTCClient {
 
       case 'renegotiation_needed':
         console.log('🔄 Renegotiation needed:', data.reason);
-        if (this.pc) {
+        // CRITICAL: Wait for connection to be established before renegotiating
+        // Renegotiating too early causes ICE transport to close prematurely
+        if (this.pc && this.pc.connectionState === 'connected') {
+          console.log('✅ Connection ready, renegotiating now');
           await this.renegotiate();
         } else {
-          console.log('🔄 Deferring renegotiation until call starts');
+          console.log('🔄 Deferring renegotiation - connection not ready (state:', this.pc?.connectionState || 'no pc', ')');
           this.needsRenegotiation = true;
+        }
+        break;
+
+      case 'transcript':
+        console.log('💬 Transcript received:', data);
+        if (this.onTranscript) {
+          this.onTranscript(data);
         }
         break;
 
@@ -374,6 +419,10 @@ export class WebRTCClient {
    */
   async getLocalMedia() {
     try {
+      console.log('🎥 Requesting camera/microphone permissions...');
+      console.log('🔒 Current protocol:', window.location.protocol);
+      console.log('🔒 Is secure context:', window.isSecureContext);
+
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
@@ -385,11 +434,31 @@ export class WebRTCClient {
           autoGainControl: true
         }
       });
-      console.log('Local media stream obtained');
+      console.log('✅ Local media stream obtained');
+      console.log('📹 Video tracks:', this.localStream.getVideoTracks().length);
+      console.log('🎤 Audio tracks:', this.localStream.getAudioTracks().length);
       return this.localStream;
     } catch (error) {
-      console.error('Error getting local media:', error);
-      if (this.onError) this.onError(error);
+      console.error('❌ Error getting local media:', error);
+      console.error('❌ Error name:', error.name);
+      console.error('❌ Error message:', error.message);
+
+      // Show user-friendly error
+      let userMessage = 'Failed to access camera/microphone: ';
+      if (error.name === 'NotAllowedError') {
+        userMessage += 'Permission denied. Please allow camera and microphone access.';
+      } else if (error.name === 'NotFoundError') {
+        userMessage += 'No camera or microphone found on this device.';
+      } else if (error.name === 'NotReadableError') {
+        userMessage += 'Camera/microphone is already in use by another application.';
+      } else if (error.name === 'NotSecureError' || !window.isSecureContext) {
+        userMessage += 'Camera/microphone requires HTTPS. Please use https:// URL.';
+      } else {
+        userMessage += error.message;
+      }
+
+      alert(userMessage);
+      if (this.onError) this.onError(new Error(userMessage));
       throw error;
     }
   }
@@ -428,12 +497,28 @@ export class WebRTCClient {
    * - 상대방이 answer로 응답함
    */
   async createPeerConnection() {
-    // Create RTCPeerConnection
+    // Use prefetched TURN credentials or fetch if not available
+    let iceServers = [
+      // STUN servers (always available, no auth needed)
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun.relay.metered.ca:80' }
+    ];
+
+    // Use cached TURN credentials if available
+    if (this.turnServers) {
+      iceServers = iceServers.concat(this.turnServers);
+      console.log('✅ Using prefetched TURN credentials');
+    } else {
+      console.warn('⚠️ TURN credentials not prefetched yet, using STUN only');
+      console.warn('💡 TIP: Connection may fail behind strict NAT/firewall');
+    }
+
+    // Create RTCPeerConnection with fetched ICE servers
+    // CRITICAL: Force relay mode to bypass localtunnel UDP limitations
+    // All media traffic will go through TURN servers
     this.pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
+      iceServers,
+      iceTransportPolicy: 'relay'  // Force TURN relay, bypass P2P
     });
 
     // Add local tracks to peer connection
@@ -489,9 +574,18 @@ export class WebRTCClient {
 
     // Handle connection state changes
     this.pc.onconnectionstatechange = () => {
-      console.log('Connection state:', this.pc.connectionState);
+      const state = this.pc.connectionState;
+      console.log('Connection state:', state);
+
       if (this.onConnectionStateChange) {
-        this.onConnectionStateChange(this.pc.connectionState);
+        this.onConnectionStateChange(state);
+      }
+
+      // Execute deferred renegotiation when connection is established
+      if (state === 'connected' && this.needsRenegotiation) {
+        console.log('🔄 Executing deferred renegotiation');
+        this.needsRenegotiation = false;
+        this.renegotiate();
       }
     };
 
@@ -504,6 +598,9 @@ export class WebRTCClient {
       sdp: offer.sdp,
       type: offer.type
     });
+
+    // NOTE: Don't process buffered candidates here!
+    // They need to wait until remote description is set (after receiving answer)
   }
 
   /**
@@ -533,12 +630,45 @@ export class WebRTCClient {
    */
   async handleAnswer(answer) {
     try {
-      await this.pc.setRemoteDescription(
-        new RTCSessionDescription(answer)
-      );
-      console.log('Remote description set');
+      // Check if we have a peer connection
+      if (!this.pc) {
+        console.warn('⚠️ No peer connection exists, ignoring answer');
+        return;
+      }
+
+      // Check current signaling state
+      console.log('📡 Current signaling state:', this.pc.signalingState);
+
+      // DEBUG: Check if answer SDP contains ICE candidates
+      const candidateCount = (answer.sdp.match(/a=candidate:/g) || []).length;
+      console.log(`📋 Answer SDP contains ${candidateCount} ICE candidates`);
+      if (candidateCount === 0) {
+        console.warn('⚠️ WARNING: Answer SDP has NO ICE candidates! Backend ICE gathering may have failed.');
+      }
+
+      // Only set remote description if we're in the correct state
+      // We should be in 'have-local-offer' state to receive an answer
+      if (this.pc.signalingState === 'have-local-offer') {
+        await this.pc.setRemoteDescription(
+          new RTCSessionDescription(answer)
+        );
+        console.log('✅ Remote description set, state:', this.pc.signalingState);
+
+        // NOW process buffered ICE candidates (remote description is set)
+        if (this.pendingCandidates && this.pendingCandidates.length > 0) {
+          console.log(`📦 Processing ${this.pendingCandidates.length} buffered ICE candidates`);
+          for (const candidateData of this.pendingCandidates) {
+            await this.handleIceCandidate(candidateData);
+          }
+          this.pendingCandidates = [];
+        }
+      } else if (this.pc.signalingState === 'stable') {
+        console.warn('⚠️ Already in stable state, ignoring duplicate answer');
+      } else {
+        console.warn(`⚠️ Unexpected state ${this.pc.signalingState}, cannot set answer`);
+      }
     } catch (error) {
-      console.error('Error setting remote description:', error);
+      console.error('❌ Error setting remote description:', error);
       if (this.onError) this.onError(error);
     }
   }
@@ -569,12 +699,39 @@ export class WebRTCClient {
    */
   async handleIceCandidate(candidateData) {
     try {
-      if (this.pc && candidateData.candidate) {
-        await this.pc.addIceCandidate(new RTCIceCandidate(candidateData.candidate));
-        console.log('ICE candidate added');
+      // DEBUG: Log full structure
+      console.log('📋 Raw candidate data:', candidateData);
+
+      if (!candidateData.candidate) {
+        console.warn('⚠️ Received empty ICE candidate, ignoring');
+        return;
       }
+
+      // If peer connection doesn't exist yet OR remote description not set, buffer the candidate
+      if (!this.pc || !this.pc.remoteDescription) {
+        console.log('📦 Buffering ICE candidate (remote description not ready yet)');
+        if (!this.pendingCandidates) {
+          this.pendingCandidates = [];
+        }
+        this.pendingCandidates.push(candidateData);
+        return;
+      }
+
+      // Create RTCIceCandidate from the data
+      // Check if candidateData is nested (has .candidate property that is an object)
+      const candidateInit = typeof candidateData.candidate === 'object'
+        ? candidateData.candidate
+        : candidateData;
+
+      console.log('📋 Candidate init:', candidateInit);
+
+      const iceCandidate = new RTCIceCandidate(candidateInit);
+
+      await this.pc.addIceCandidate(iceCandidate);
+      console.log('✅ ICE candidate added');
     } catch (error) {
-      console.error('Error adding ICE candidate:', error);
+      console.error('❌ Error adding ICE candidate:', error);
+      console.error('Candidate data:', candidateData);
       if (this.onError) this.onError(error);
     }
   }
@@ -689,14 +846,6 @@ export class WebRTCClient {
     try {
       await this.getLocalMedia();
       await this.createPeerConnection();
-
-      // 방에 입장 후 다른 사용자가 먼저 통화를 시작한 경우 재협상
-      if (this.needsRenegotiation) {
-        console.log('🔄 Executing deferred renegotiation');
-        this.needsRenegotiation = false;
-        // 서버가 answer를 보낸 후 재협상하기 위해 약간 대기
-        setTimeout(() => this.renegotiate(), 1000);
-      }
     } catch (error) {
       console.error('Error starting call:', error);
       if (this.onError) this.onError(error);

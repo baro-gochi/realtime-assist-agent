@@ -47,46 +47,48 @@ See Also:
 """
 import asyncio
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable, List
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
+from aiortc.rtcicetransport import RTCIceCandidate
+from stt_service import STTService
 
 logger = logging.getLogger(__name__)
-
+MAX_WAIT = 5.0
 
 class AudioRelayTrack(MediaStreamTrack):
     """오디오 프레임을 릴레이하고 STT 처리를 위해 캡처하는 트랙.
 
     다른 참가자에게 오디오를 전달하면서 동시에 음성 인식 처리를 위한
-    프레임을 큐에 저장합니다. 향후 실시간 STT 기능 구현을 위한 준비입니다.
+    프레임을 STT 큐에 전달합니다.
 
     Attributes:
         kind (str): 트랙 종류 ("audio")
         track (MediaStreamTrack): 원본 오디오 트랙
-        audio_frames (asyncio.Queue): STT 처리를 위한 오디오 프레임 큐 (최대 100개)
+        stt_queue (Optional[asyncio.Queue]): STT 처리를 위한 오디오 프레임 큐
 
     Note:
         - 큐가 가득 차면 새 프레임은 버려짐 (오버플로우 방지)
-        - 현재는 프레임을 저장만 하며, 실제 STT 처리는 미구현
+        - stt_queue가 None이면 STT 처리 건너뜀
 
     Examples:
         >>> original_track = ... # 원본 오디오 트랙
-        >>> relay_track = AudioRelayTrack(original_track)
-        >>> frame = await relay_track.recv()  # 프레임 수신 및 릴레이
-        >>> # audio_frames 큐에서 STT 처리 가능
-        >>> captured_frame = await relay_track.audio_frames.get()
+        >>> stt_queue = asyncio.Queue(maxsize=100)
+        >>> relay_track = AudioRelayTrack(original_track, stt_queue)
+        >>> frame = await relay_track.recv()  # 프레임 수신, STT 큐 전달, 릴레이
     """
     kind = "audio"
 
-    def __init__(self, track: MediaStreamTrack):
+    def __init__(self, track: MediaStreamTrack, stt_queue: Optional[asyncio.Queue] = None):
         """AudioRelayTrack 초기화.
 
         Args:
             track (MediaStreamTrack): 릴레이할 원본 오디오 트랙
+            stt_queue (Optional[asyncio.Queue]): STT 처리용 큐 (None이면 STT 비활성화)
         """
         super().__init__()
         self.track = track
-        self.audio_frames = asyncio.Queue(maxsize=100)
+        self.stt_queue = stt_queue
 
     async def recv(self):
         """오디오 프레임을 수신하고 릴레이합니다.
@@ -103,12 +105,19 @@ class AudioRelayTrack(MediaStreamTrack):
         """
         frame = await self.track.recv()
 
-        # Store frame for STT processing (future implementation)
-        try:
-            self.audio_frames.put_nowait(frame)
-        except asyncio.QueueFull:
-            # Skip frame if queue is full
-            pass
+        # Send frame to STT queue if available
+        if self.stt_queue:
+            try:
+                # Debug: Log first frame
+                if not hasattr(self, '_first_frame_logged'):
+                    logger.info("🎤 AudioRelayTrack: First frame sent to STT queue!")
+                    self._first_frame_logged = True
+
+                self.stt_queue.put_nowait(frame)
+            except asyncio.QueueFull:
+                # Skip frame if queue is full
+                logger.warning("⚠️ STT queue full, dropping audio frame")
+                pass
 
         return frame
 
@@ -210,8 +219,28 @@ class PeerConnectionManager:
         # Callback for track received event (used to trigger renegotiation)
         self.on_track_received_callback = None
 
+        # Callback for ICE candidate event (used to send backend candidates to client)
+        self.on_ice_candidate_callback = None
+
         # Track which peers have already triggered renegotiation (to avoid multiple triggers)
         self.renegotiation_triggered: Dict[str, bool] = {}
+
+        # STT service instances per peer (peer_id -> STTService)
+        # Each peer needs its own STT service for independent streaming
+        self.stt_services: Dict[str, STTService] = {}
+        self.on_transcript_callback: Optional[Callable[[str, str, str], None]] = None
+
+        # Audio processing queues for STT (peer_id -> Queue)
+        self.audio_queues: Dict[str, asyncio.Queue] = {}
+
+        # STT processing tasks (peer_id -> Task)
+        self.stt_tasks: Dict[str, asyncio.Task] = {}
+
+        # Audio consumer tasks to prevent garbage collection (peer_id -> List[Task])
+        self.audio_consumer_tasks: Dict[str, List[asyncio.Task]] = {}
+
+        # Track TURN candidate arrival (peer_id -> bool)
+        self.turn_candidate_received: Dict[str, bool] = {}
 
     async def create_peer_connection(
         self,
@@ -219,6 +248,7 @@ class PeerConnectionManager:
         room_name: str,
         other_peers_in_room: list
     ) -> RTCPeerConnection:
+        logger.info(f"▶ create_peer_connection: peer={peer_id[:8]}, room={room_name}, others={len(other_peers_in_room)}")
         """룸의 피어를 위한 새로운 WebRTC 연결을 생성합니다.
 
         RTCPeerConnection을 생성하고 이벤트 핸들러를 등록합니다.
@@ -257,17 +287,79 @@ class PeerConnectionManager:
         """
         # ICE 서버 설정 (STUN/TURN)
         from aiortc import RTCConfiguration, RTCIceServer
+        import os
+        import httpx
 
-        config = RTCConfiguration(
-            iceServers=[
-                RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-                RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-            ]
-        )
+        ice_servers = [
+            # STUN servers (Google + Metered.ca)
+            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun.relay.metered.ca:80"]),
+        ]
 
+        # TURN 서버 추가 - Metered.ca API에서 동적 크레덴셜 가져오기
+        metered_api_key = os.getenv("METERED_API_KEY")
+        if metered_api_key:
+            try:
+                # Fetch dynamic TURN credentials from Metered.ca API (same as frontend)
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"https://my-dev-turnserver.metered.live/api/v1/turn/credentials?apiKey={metered_api_key}",
+                        timeout=10.0
+                    )
+
+                    if response.status_code == 200:
+                        turn_servers = response.json()
+
+                        # Convert Metered.ca format to aiortc RTCIceServer format
+                        for server in turn_servers:
+                            # Skip STUN servers (already added)
+                            if server.get("urls", "").startswith("stun:"):
+                                continue
+
+                            # Add TURN servers with credentials
+                            ice_servers.append(RTCIceServer(
+                                urls=[server["urls"]],
+                                username=server.get("username"),
+                                credential=server.get("credential")
+                            ))
+
+                        logger.info(f"✅ TURN servers configured with Metered.ca (dynamic credentials, {len(turn_servers)} servers)")
+                        logger.debug(f"TURN credentials - username: {turn_servers[1].get('username') if len(turn_servers) > 1 else 'N/A'}")
+                    else:
+                        logger.warning(f"⚠️ Failed to fetch TURN credentials from Metered.ca API: HTTP {response.status_code}")
+            except Exception as e:
+                logger.error(f"❌ Error fetching TURN credentials from Metered.ca API: {e}")
+        else:
+            logger.warning("⚠️ METERED_API_KEY not found in .env - using STUN only")
+
+        # aiortc doesn't support iceTransportPolicy parameter
+        # Use both TURN (preferred) and STUN (fallback) servers
+        config = RTCConfiguration(iceServers=ice_servers)
+
+        # CRITICAL: Set bundlePolicy to force ICE to wait for all candidates
+        # This prevents gathering from completing before TURN is ready
         pc = RTCPeerConnection(configuration=config)
+
+        # Force ICE gathering to wait by NOT calling setLocalDescription immediately
+        logger.info(f"  🔧 RTCPeerConnection created, TURN will allocate in background")
         self.peers[peer_id] = pc
         self.peer_rooms[peer_id] = room_name
+
+        @pc.on("icecandidate")
+        async def on_ice_candidate(candidate):
+            """ICE candidate 생성 시 호출되는 이벤트 핸들러."""
+            if candidate:
+                is_relay = "relay" in candidate.candidate.lower()
+                cand_type = "TURN" if is_relay else "host/srflx"
+                logger.info(f"  🔔 ICE candidate: type={cand_type}, peer={peer_id[:8]}")
+
+                if is_relay:
+                    self.turn_candidate_received[peer_id] = True
+
+                if self.on_ice_candidate_callback:
+                    await self.on_ice_candidate_callback(peer_id, candidate)
+                else:
+                    logger.warning(f"  ⚠️ Callback is None!")
 
         @pc.on("iceconnectionstatechange")
         async def on_ice_connection_state_change():
@@ -314,11 +406,30 @@ class PeerConnectionManager:
             trigger_renegotiation = peer_id not in self.renegotiation_triggered
 
             if track.kind == "audio":
-                # Store original track (no decoding/re-encoding)
-                self.audio_tracks[peer_id] = track
+                # Start STT processing for this peer if not already started
+                if peer_id not in self.stt_tasks:
+                    await self._start_stt_processing(peer_id, room_name)
 
-                # Add track to other peers in same room
-                await self._relay_to_room_peers(peer_id, room_name, track)
+                # Get STT queue for this peer
+                stt_queue = self.audio_queues.get(peer_id)
+
+                # Create AudioRelayTrack with STT queue
+                relay_track = AudioRelayTrack(track, stt_queue)
+
+                # Store relay track (instead of original track)
+                self.audio_tracks[peer_id] = relay_track
+
+                # IMPORTANT: Start consuming this track immediately for STT
+                # Even if no other peers are in the room, we need to consume the track
+                # to get frames for STT processing
+                consumer_task = asyncio.create_task(self._consume_audio_track(peer_id, relay_track))
+                # Store task to prevent it from being garbage collected
+                if peer_id not in self.audio_consumer_tasks:
+                    self.audio_consumer_tasks[peer_id] = []
+                self.audio_consumer_tasks[peer_id].append(consumer_task)
+
+                # Add relay track to other peers in same room
+                await self._relay_to_room_peers(peer_id, room_name, relay_track)
 
             elif track.kind == "video":
                 # Store original track (no decoding/re-encoding)
@@ -396,6 +507,7 @@ class PeerConnectionManager:
         offer: dict,
         other_peers_in_room: list
     ) -> dict:
+        logger.info(f"▶ handle_offer: peer={peer_id[:8]}, room={room_name}")
         """WebRTC offer를 처리하고 answer를 생성합니다.
 
         클라이언트로부터 받은 WebRTC offer를 처리하여 피어 연결을 설정하고,
@@ -487,9 +599,18 @@ class PeerConnectionManager:
 
             logger.info(f"Total new tracks added: {tracks_added}")
 
+            # Wait for TURN BEFORE creating answer
+            logger.info(f"  ⏳ [Renego] Waiting {MAX_WAIT}s for TURN...")
+            await asyncio.sleep(MAX_WAIT)
+            logger.info(f"  ✅ [Renego] TURN ready")
+
             # Create answer (includes newly added tracks)
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
+
+            # Log ICE gathering state
+            candidate_count = pc.localDescription.sdp.count("a=candidate:")
+            logger.info(f"  📊 [Renego] After setLocalDescription: gathering={pc.iceGatheringState}, candidates={candidate_count}")
 
             return {
                 "sdp": pc.localDescription.sdp,
@@ -519,8 +640,18 @@ class PeerConnectionManager:
         )
 
         # Create answer
+        logger.info(f"  📝 Creating answer...")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
+
+        candidate_count = pc.localDescription.sdp.count("a=candidate:")
+        logger.info(f"  📊 SDP has {candidate_count} candidates, gathering={pc.iceGatheringState}")
+
+        # NOTE: aiortc doesn't fire on("icecandidate") for candidates after gathering completes
+        # TURN allocation happens in background but won't trigger events
+        # We just send the answer - client will use STUN/host candidates
+        # Connection should still work via STUN reflexive candidates
+        logger.info(f"  ✅ Sending answer (TURN may complete later)")
 
         return {
             "sdp": pc.localDescription.sdp,
@@ -572,6 +703,16 @@ class PeerConnectionManager:
         if peer_id in self.renegotiation_triggered:
             del self.renegotiation_triggered[peer_id]
 
+        # Cancel audio consumer tasks
+        if peer_id in self.audio_consumer_tasks:
+            for task in self.audio_consumer_tasks[peer_id]:
+                if not task.done():
+                    task.cancel()
+            del self.audio_consumer_tasks[peer_id]
+
+        # Stop STT processing
+        await self._stop_stt_processing(peer_id)
+
         logger.info(f"Peer {peer_id} connection closed")
 
     async def cleanup_all(self):
@@ -594,6 +735,10 @@ class PeerConnectionManager:
         for peer_id in peer_ids:
             await self.close_peer_connection(peer_id)
 
+    def get_peer_connection(self, peer_id: str) -> Optional[RTCPeerConnection]:
+        """피어의 RTCPeerConnection을 반환합니다."""
+        return self.peers.get(peer_id)
+
     def get_peer_room(self, peer_id: str) -> Optional[str]:
         """피어가 속한 룸의 이름을 반환합니다.
 
@@ -612,3 +757,215 @@ class PeerConnectionManager:
             상담실1
         """
         return self.peer_rooms.get(peer_id)
+
+    async def _consume_audio_track(self, peer_id: str, track: AudioRelayTrack):
+        """오디오 트랙을 consume하여 STT 처리를 활성화합니다.
+
+        AudioRelayTrack의 recv()를 계속 호출하여 프레임을 소비합니다.
+        이렇게 해야 WebRTC가 계속 프레임을 전송하고, STT queue에 프레임이 들어갑니다.
+
+        Args:
+            peer_id (str): 피어 ID
+            track (AudioRelayTrack): Consume할 오디오 트랙
+
+        Note:
+            - 트랙이 종료되거나 에러 발생 시 자동으로 종료됩니다
+            - 피어가 연결 해제되면 자동으로 정리됩니다
+        """
+        logger.info(f"🎧 Starting audio track consumer for peer {peer_id}")
+        frame_count = 0
+        try:
+            while True:
+                # Consume frame from track (this triggers AudioRelayTrack.recv())
+                frame = await track.recv()
+                frame_count += 1
+
+                if frame_count == 1:
+                    logger.info(f"✅ First frame consumed from peer {peer_id}")
+                elif frame_count % 500 == 0:
+                    logger.debug(f"Consumed {frame_count} frames from peer {peer_id}")
+
+        except asyncio.CancelledError:
+            logger.info(f"📡 Audio consumer task cancelled for peer {peer_id}")
+        except Exception as e:
+            logger.error(f"❌ Audio track consumer error for peer {peer_id}: {type(e).__name__}: {e}", exc_info=True)
+        finally:
+            logger.info(f"🏁 Audio track consumer ended for peer {peer_id}. Total frames: {frame_count}")
+
+    async def _start_stt_processing(self, peer_id: str, room_name: str):
+        """피어의 오디오 스트림에 대한 STT 처리를 시작합니다.
+
+        오디오 프레임 큐를 생성하고 STT 처리 태스크를 시작합니다.
+        각 피어는 독립적인 STTService 인스턴스를 가집니다.
+
+        Args:
+            peer_id (str): STT를 시작할 피어의 ID
+            room_name (str): 피어가 속한 룸 이름
+
+        Note:
+            - 피어당 하나의 STT 처리 태스크만 실행됨
+            - 각 피어는 독립적인 Google STT API 스트림을 가짐
+            - 인식된 텍스트는 on_transcript_callback으로 전달됨
+        """
+        if peer_id in self.stt_tasks:
+            logger.warning(f"STT already running for peer {peer_id}")
+            return
+
+        # Create dedicated STTService instance for this peer
+        stt_service = STTService()
+        self.stt_services[peer_id] = stt_service
+
+        # Create audio queue for this peer
+        # Increased from 100 to 500 to prevent overflow during STT restarts
+        # 48kHz audio = ~50 frames/sec, so 500 frames = ~10 seconds buffer
+        audio_queue = asyncio.Queue(maxsize=500)
+        self.audio_queues[peer_id] = audio_queue
+
+        # Start STT processing task
+        task = asyncio.create_task(
+            self._process_stt_for_peer(peer_id, room_name, audio_queue, stt_service)
+        )
+        self.stt_tasks[peer_id] = task
+
+        logger.info(f"🎤 Started STT processing for peer {peer_id} in room '{room_name}' with dedicated STT service")
+
+    async def _process_stt_for_peer(
+        self,
+        peer_id: str,
+        room_name: str,
+        audio_queue: asyncio.Queue,
+        stt_service: STTService
+    ):
+        """피어의 오디오 스트림을 STT로 처리합니다.
+
+        오디오 큐에서 프레임을 읽어 Google STT API로 전송하고
+        인식 결과를 콜백으로 전달합니다.
+
+        Google STT v2 스트리밍 제한사항 대응:
+        - 스트림이 타임아웃되면 자동으로 재시도
+        - 각 스트림은 약 25초 후 자동 재시작 (타임아웃 방지)
+
+        Args:
+            peer_id (str): 처리할 피어의 ID
+            room_name (str): 피어가 속한 룸 이름
+            audio_queue (asyncio.Queue): 오디오 프레임 큐
+            stt_service (STTService): 이 피어 전용 STT 서비스 인스턴스
+
+        Note:
+            - 무한 루프로 계속 처리됨 (연결 종료 시 취소)
+            - 각 피어는 독립적인 STT 스트림을 사용
+            - 스트림 타임아웃 시 자동 재시도
+        """
+        retry_count = 0
+        max_retries = 100  # 연결이 끊길 때까지 계속 재시도
+
+        while retry_count < max_retries:
+            try:
+                logger.info(f"🎤 Starting STT stream #{retry_count + 1} for peer {peer_id}")
+
+                async for transcript in stt_service.process_audio_stream(audio_queue):
+                    logger.info(f"💬 Transcript from peer {peer_id}: {transcript}")
+
+                    # Call callback if set
+                    if self.on_transcript_callback:
+                        await self.on_transcript_callback(peer_id, room_name, transcript)
+
+                # Stream ended normally - restart it for continuous recognition
+                logger.info(f"🔄 STT stream ended normally for peer {peer_id}, restarting for continuous recognition...")
+
+                # Clear any accumulated frames during stream closure
+                queue_size = audio_queue.qsize()
+                if queue_size > 0:
+                    logger.info(f"🧹 Clearing {queue_size} frames before restarting")
+                    while not audio_queue.empty():
+                        try:
+                            audio_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+
+                # Wait briefly before restarting
+                await asyncio.sleep(0.2)
+
+                # Create new STT service for fresh stream
+                stt_service = STTService()
+                self.stt_services[peer_id] = stt_service
+                continue  # Restart the loop instead of breaking
+
+            except asyncio.CancelledError:
+                logger.info(f"STT processing cancelled for peer {peer_id}")
+                raise
+
+            except Exception as e:
+                retry_count += 1
+                error_msg = str(e)
+
+                # Check if it's a timeout error
+                if "timeout" in error_msg.lower() or "409" in error_msg:
+                    logger.warning(
+                        f"⏱️ STT stream timeout for peer {peer_id} "
+                        f"(attempt {retry_count}/{max_retries}). "
+                        f"Restarting stream..."
+                    )
+
+                    # CRITICAL: Clear the queue to prevent overflow
+                    # The old frames are stale and will cause the new stream to timeout too
+                    queue_size = audio_queue.qsize()
+                    if queue_size > 0:
+                        logger.info(f"🧹 Clearing {queue_size} stale frames from audio queue")
+                        while not audio_queue.empty():
+                            try:
+                                audio_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+
+                    # Wait a bit before retrying
+                    await asyncio.sleep(0.5)
+
+                    # Create new STT service instance to reset stream
+                    stt_service = STTService()
+                    self.stt_services[peer_id] = stt_service
+                    continue
+                else:
+                    # Other errors - log and retry
+                    logger.error(
+                        f"Error in STT processing for peer {peer_id}: {e}",
+                        exc_info=True
+                    )
+                    await asyncio.sleep(1)
+                    continue
+
+        if retry_count >= max_retries:
+            logger.error(f"❌ Max STT retries reached for peer {peer_id}")
+
+    async def _stop_stt_processing(self, peer_id: str):
+        """피어의 STT 처리를 중지합니다.
+
+        STT 처리 태스크를 취소하고 오디오 큐 및 STT 서비스를 정리합니다.
+
+        Args:
+            peer_id (str): STT를 중지할 피어의 ID
+        """
+        # Cancel STT task
+        if peer_id in self.stt_tasks:
+            task = self.stt_tasks[peer_id]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            del self.stt_tasks[peer_id]
+
+        # Clear audio queue
+        if peer_id in self.audio_queues:
+            # Send None to signal end of stream
+            try:
+                await self.audio_queues[peer_id].put(None)
+            except asyncio.QueueFull:
+                pass
+            del self.audio_queues[peer_id]
+
+        # Remove STT service instance
+        if peer_id in self.stt_services:
+            del self.stt_services[peer_id]
+
+        logger.info(f"🛑 Stopped STT processing for peer {peer_id}")

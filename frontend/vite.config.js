@@ -10,11 +10,13 @@
  * - 외부 접속: 모바일 기기나 다른 컴퓨터에서 접속 가능
  */
 
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
 
 export default defineConfig({
   plugins: [react()],
+  // envDir: path.resolve(__dirname, '..'),
   server: {
     /**
      * 개발 서버 포트 번호
@@ -53,10 +55,17 @@ export default defineConfig({
     host: '0.0.0.0', // 또는 host: true 도 가능
 
     /**
-     * WebSocket 프록시 설정
+     * WebSocket 및 API 프록시 설정
      * @description
-     * '/ws' 경로로 오는 WebSocket 요청을 백엔드 서버로 전달합니다.
-     * 개발 중 CORS 문제를 해결하기 위한 설정입니다.
+     * '/ws' 및 '/api' 경로를 백엔드 서버로 프록시합니다.
+     * 터널 사용 시 VITE_BACKEND_URL 환경변수로 백엔드 URL 지정 가능
+     *
+     * @example
+     * # 로컬 개발 (기본값)
+     * npm run dev
+     *
+     * # 터널 사용 시
+     * VITE_BACKEND_URL=https://my-dev-backend.loca.lt npm run dev
      */
     allowedHosts: [
       "my-dev-webrtc.loca.lt",
@@ -64,8 +73,15 @@ export default defineConfig({
     ],
     proxy: {
       '/ws': {
-        target: 'ws://localhost:8000',
-        ws: true
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        ws: true,
+        changeOrigin: true,
+        secure: false,  // Allow self-signed certs in development
+      },
+      '/api': {
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        changeOrigin: true,
+        secure: false,  // Allow self-signed certs in development
       }
     }
   }

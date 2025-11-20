@@ -85,12 +85,16 @@ function App() {
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   // @type {boolean} - 비디오 활성화 상태
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
+  // @type {Array<{peer_id: string, nickname: string, text: string, timestamp: number}>} - STT 인식 결과 목록
+  const [transcripts, setTranscripts] = useState([]);
 
   // Ref 객체 (DOM 참조 및 인스턴스 유지)
   // @type {React.RefObject<HTMLVideoElement>} - 내 비디오 엘리먼트
   const localVideoRef = useRef(null);
   // @type {React.RefObject<HTMLVideoElement>} - 상대방 비디오 엘리먼트
   const remoteVideoRef = useRef(null);
+  // @type {React.RefObject<HTMLDivElement>} - 트랜스크립트 컨테이너 (자동 스크롤용)
+  const transcriptContainerRef = useRef(null);
   // @type {React.RefObject<WebRTCClient>} - WebRTC 클라이언트 인스턴스
   const webrtcClientRef = useRef(null);
 
@@ -127,15 +131,11 @@ function App() {
     };
     console.log('🔗 Location info:', locationInfo);
 
-    // localtunnel 사용 시: wss://my-dev-webrtc.loca.lt/ws
-    // 로컬 개발 시: ws://localhost:8000/ws
-    let wsUrl;
-    if (hostname === 'localhost' || hostname === '127.0.0.1') {
-      wsUrl = 'ws://localhost:8000/ws';
-    } else {
-      // localtunnel이나 다른 호스트 사용 시
-      wsUrl = `${protocol}//${hostname}/ws`;
-    }
+    // WebSocket URL 동적 생성
+    // 터널 사용 시 (localtunnel/ngrok): wss://my-domain.loca.lt/ws
+    // 로컬 개발: ws://localhost:8000/ws
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
     console.log('🔗 WebSocket URL:', wsUrl);
     setDebugInfo(`Host: ${hostname}\nWS URL: ${wsUrl}\nProtocol: ${window.location.protocol}`);
@@ -223,6 +223,19 @@ function App() {
       console.error('WebRTC error:', err);
     };
 
+    // STT transcript 이벤트 핸들러
+    client.onTranscript = (data) => {
+      console.log('💬 Transcript received:', data);
+      console.log(`✅ STT 도착! "${data.text}" (${data.nickname})`);
+
+      setTranscripts(prev => [...prev, {
+        peer_id: data.peer_id,
+        nickname: data.nickname,
+        text: data.text,
+        timestamp: data.timestamp || Date.now()
+      }]);
+    };
+
     // Cleanup on unmount
     return () => {
       if (client) {
@@ -230,6 +243,15 @@ function App() {
       }
     };
   }, []);
+
+  /**
+   * 트랜스크립트 추가 시 자동 스크롤
+   */
+  useEffect(() => {
+    if (transcriptContainerRef.current) {
+      transcriptContainerRef.current.scrollTop = transcriptContainerRef.current.scrollHeight;
+    }
+  }, [transcripts]);
 
   /**
    * 서버 연결 버튼 클릭 핸들러
@@ -309,6 +331,7 @@ function App() {
 
     try {
       setError('');
+      setTranscripts([]);  // 새 방에 입장하면 대화 내용 초기화
       await webrtcClientRef.current.joinRoom(roomInput.trim(), nicknameInput.trim());
       setRoomName(roomInput.trim());
       setNickname(nicknameInput.trim());
@@ -348,17 +371,32 @@ function App() {
   const handleStartCall = async () => {
     try {
       setError('');
+      console.log('🎬 Start Call button clicked');
+
+      // WebRTC 클라이언트 확인
+      if (!webrtcClientRef.current) {
+        throw new Error('WebRTC client not initialized');
+      }
+
+      console.log('📱 Requesting camera/microphone permissions...');
+
       // 카메라/마이크 권한 요청 및 WebRTC 연결 생성
       await webrtcClientRef.current.startCall();
+
+      console.log('✅ Call started successfully');
 
       // 내 비디오를 화면에 표시
       if (localVideoRef.current && webrtcClientRef.current.localStream) {
         localVideoRef.current.srcObject = webrtcClientRef.current.localStream;
+        console.log('📹 Local video attached');
       }
 
       setIsCallActive(true);
     } catch (err) {
-      setError(`Failed to start call: ${err.message}`);
+      console.error('❌ Start call error:', err);
+      const errorMsg = `Failed to start call: ${err.message}`;
+      setError(errorMsg);
+      alert(errorMsg); // 모바일에서 바로 볼 수 있도록 alert 추가
     }
   };
 
@@ -459,6 +497,7 @@ function App() {
     setNickname('');
     setPeerCount(0);
     setParticipants([]);
+    setTranscripts([]);  // 대화 내용 초기화
     setConnectionState('');
     setIsAudioEnabled(true);
     setIsVideoEnabled(true);
@@ -610,6 +649,28 @@ function App() {
                 className="video-element"
                 style={{ objectFit: 'cover' }}
               />
+            </div>
+          </div>
+
+          {/* STT Transcript Section */}
+          <div className="transcript-section">
+            <h3>💬 Real-time Transcripts</h3>
+            <div className="transcript-container" ref={transcriptContainerRef}>
+              {transcripts.length === 0 ? (
+                <p className="no-transcripts">음성 인식 결과가 여기에 표시됩니다...</p>
+              ) : (
+                transcripts.map((transcript, index) => (
+                  <div key={index} className={`transcript-item ${transcript.peer_id === peerId ? 'own' : 'other'}`}>
+                    <div className="transcript-header">
+                      <span className="transcript-nickname">{transcript.nickname}</span>
+                      <span className="transcript-time">
+                        {new Date(transcript.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <div className="transcript-text">{transcript.text}</div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 

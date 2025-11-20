@@ -36,4 +36,8 @@ Thumbs.db
 *.swp
 *.swo
 
-zoom-clone/
+# gcloud-keys
+gcloud-keys/*.json
+
+#data
+!data/.gitkeep

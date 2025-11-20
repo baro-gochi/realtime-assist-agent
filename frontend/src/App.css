@@ -275,6 +275,98 @@ body {
   font-weight: 500;
 }
 
+/* Transcript Section */
+.transcript-section {
+  background: rgba(255, 255, 255, 0.95);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+}
+
+.transcript-section h3 {
+  color: #333;
+  margin-bottom: 15px;
+  font-size: 1.3rem;
+}
+
+.transcript-container {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px;
+  background: #f5f5f5;
+  border-radius: 8px;
+  scroll-behavior: smooth;
+}
+
+.no-transcripts {
+  color: #999;
+  text-align: center;
+  padding: 40px 20px;
+  font-style: italic;
+}
+
+.transcript-item {
+  margin-bottom: 15px;
+  padding: 12px 15px;
+  border-radius: 8px;
+  animation: slideIn 0.3s ease;
+}
+
+.transcript-item.own {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  margin-left: 20px;
+}
+
+.transcript-item.other {
+  background: white;
+  color: #333;
+  margin-right: 20px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.transcript-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.transcript-nickname {
+  font-weight: 600;
+}
+
+.transcript-item.own .transcript-nickname {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.transcript-item.other .transcript-nickname {
+  color: #667eea;
+}
+
+.transcript-time {
+  opacity: 0.7;
+  font-size: 0.8rem;
+}
+
+.transcript-text {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 768px) {
   .video-container {
     grid-template-columns: 1fr;

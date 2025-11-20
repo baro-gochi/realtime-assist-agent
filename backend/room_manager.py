@@ -30,11 +30,29 @@ See Also:
     peer_manager.py: WebRTC 연결 관리
 """
 import logging
+import os
+from datetime import datetime
 from typing import Dict, List, Set, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TranscriptEntry:
+    """대화 내용을 나타내는 데이터 클래스.
+
+    Attributes:
+        peer_id (str): 발화자의 피어 ID
+        nickname (str): 발화자의 닉네임
+        text (str): 발화 내용
+        timestamp (float): 발화 시간 (Unix timestamp)
+    """
+    peer_id: str
+    nickname: str
+    text: str
+    timestamp: float
 
 
 @dataclass
@@ -104,6 +122,12 @@ class RoomManager:
         # peer_id -> room_name (for quick lookup)
         self.peer_to_room: Dict[str, str] = {}
 
+        # room_name -> List[TranscriptEntry] (대화 내용 저장)
+        self.room_transcripts: Dict[str, List[TranscriptEntry]] = {}
+
+        # room_name -> start_timestamp (방 시작 시간)
+        self.room_start_times: Dict[str, float] = {}
+
     def create_room(self, room_name: str) -> None:
         """새로운 룸을 생성합니다.
 
@@ -124,6 +148,8 @@ class RoomManager:
         """
         if room_name not in self.rooms:
             self.rooms[room_name] = {}
+            self.room_transcripts[room_name] = []
+            self.room_start_times[room_name] = datetime.now().timestamp()
             logger.info(f"Room '{room_name}' created")
 
     def join_room(self, room_name: str, peer_id: str, nickname: str, websocket: WebSocket) -> None:
@@ -207,7 +233,16 @@ class RoomManager:
 
             # Delete room if empty
             if not self.rooms[room_name]:
+                # Save transcript to file before deleting room
+                self._save_transcript_to_file(room_name)
+
+                # Clean up room data
                 del self.rooms[room_name]
+                if room_name in self.room_transcripts:
+                    del self.room_transcripts[room_name]
+                if room_name in self.room_start_times:
+                    del self.room_start_times[room_name]
+
                 logger.info(f"Room '{room_name}' deleted (empty)")
             else:
                 logger.info(f"Peer '{nickname}' ({peer_id}) left room '{room_name}'. "
@@ -371,3 +406,85 @@ class RoomManager:
             0
         """
         return len(self.rooms.get(room_name, {}))
+
+    def add_transcript(self, peer_id: str, room_name: str, text: str, timestamp: Optional[float] = None):
+        """대화 내용을 룸의 transcript 히스토리에 추가합니다.
+
+        Args:
+            peer_id (str): 발화자의 피어 ID
+            room_name (str): 룸 이름
+            text (str): 발화 내용
+            timestamp (float, optional): 발화 시간. None이면 현재 시간 사용
+
+        Examples:
+            >>> manager = RoomManager()
+            >>> manager.join_room("상담실1", "peer-123", "상담사", ws)
+            >>> manager.add_transcript("peer-123", "상담실1", "안녕하세요")
+        """
+        if room_name not in self.room_transcripts:
+            self.room_transcripts[room_name] = []
+
+        # Get peer nickname
+        peer = self.get_peer(peer_id)
+        nickname = peer.nickname if peer else "Unknown"
+
+        # Use current time if not provided
+        if timestamp is None:
+            timestamp = datetime.now().timestamp()
+
+        entry = TranscriptEntry(
+            peer_id=peer_id,
+            nickname=nickname,
+            text=text,
+            timestamp=timestamp
+        )
+        self.room_transcripts[room_name].append(entry)
+        logger.debug(f"Added transcript to room '{room_name}': {nickname}: {text}")
+
+    def _save_transcript_to_file(self, room_name: str):
+        """룸의 대화 내용을 텍스트 파일로 저장합니다.
+
+        Args:
+            room_name (str): 저장할 룸의 이름
+
+        Note:
+            - 파일은 transcripts/ 디렉토리에 저장됨
+            - 파일명: room_{room_name}_{timestamp}.txt
+            - 포맷: [시:분:초] 이름: 메시지
+        """
+        transcripts = self.room_transcripts.get(room_name, [])
+        if not transcripts:
+            logger.info(f"No transcripts to save for room '{room_name}'")
+            return
+
+        # Create transcripts directory if not exists
+        os.makedirs("transcripts", exist_ok=True)
+
+        # Generate filename with timestamp
+        end_time = datetime.now()
+        filename = f"room_{room_name}_{end_time.strftime('%Y%m%d_%H%M%S')}.txt"
+        filepath = os.path.join("transcripts", filename)
+
+        # Get room start time
+        start_timestamp = self.room_start_times.get(room_name, transcripts[0].timestamp)
+        start_time = datetime.fromtimestamp(start_timestamp)
+
+        # Write to file
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                # Write header
+                f.write(f"[상담실: {room_name}]\n")
+                f.write(f"시작 시간: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"종료 시간: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"총 메시지 수: {len(transcripts)}\n")
+                f.write("=" * 60 + "\n\n")
+
+                # Write each transcript
+                for entry in transcripts:
+                    msg_time = datetime.fromtimestamp(entry.timestamp)
+                    time_str = msg_time.strftime('%H:%M:%S')
+                    f.write(f"{entry.nickname} [{time_str}]: {entry.text}\n")
+
+            logger.info(f"💾 Saved transcript for room '{room_name}' to {filepath} ({len(transcripts)} messages)")
+        except Exception as e:
+            logger.error(f"Failed to save transcript for room '{room_name}': {e}")

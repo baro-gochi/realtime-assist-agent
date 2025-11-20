@@ -234,6 +234,33 @@ class AudioRelayTrack(MediaStreamTrack):
 - `answer`: WebRTC answer (`{ sdp, type }`)
 - `error`: 에러 메시지
 
+## TURN 서버 설정 (NAT 통과)
+
+NAT/방화벽 뒤에 있는 사용자끼리 연결하려면 TURN 서버가 필요합니다.
+
+### Metered.ca TURN 서버 사용
+
+1. **계정 생성**: https://dashboard.metered.ca/ 에서 무료 계정 생성
+
+2. **API Key 발급**: Dashboard에서 API Key 복사
+
+3. **.env 파일 설정**:
+   ```bash
+   # Primary method: Dynamic TURN credentials (RECOMMENDED)
+   METERED_API_KEY=your_api_key_here
+   ```
+
+4. **동작 확인**:
+   - Backend 로그에서 `✅ TURN servers configured with Metered.ca (dynamic credentials)` 확인
+   - Frontend 로그에서 `✅ TURN servers fetched from Backend` 확인
+
+### TURN vs STUN
+
+- **STUN**: 공인 IP 발견용 (기본 포함)
+- **TURN**: NAT/방화벽 통과용 (Metered.ca 필요)
+
+대부분의 경우 STUN만으로 연결되지만, 엄격한 기업 방화벽이나 대칭형 NAT 뒤에서는 TURN이 필수입니다.
+
 ## 트러블슈팅
 
 ### 카메라/마이크 권한 오류
@@ -243,13 +270,16 @@ class AudioRelayTrack(MediaStreamTrack):
 ### 연결이 안 될 때
 - Backend 서버가 실행 중인지 확인
 - 브라우저 콘솔에서 WebSocket 연결 상태 확인
-- STUN 서버 연결 확인 (기본: Google STUN 서버)
+- STUN/TURN 서버 연결 확인
+- `.env` 파일에 `METERED_API_KEY` 설정 확인
 
 ### 같은 방에 있는데 비디오가 안 보일 때
 - **방 이름이 정확히 일치**하는지 확인 (대소문자 구분)
 - 각 탭에서 "Start Call"을 실행해야 합니다
 - WebRTC 연결 상태가 "connected"인지 확인
 - 브라우저 콘솔에서 에러 메시지 확인
+- **TURN 401 에러**: `.env`의 `METERED_API_KEY`가 올바른지 확인
+- **ICE connection failed**: TURN 서버 설정 확인, Metered.ca 대시보드에서 크레딧 잔액 확인
 
 ### 방 관련 이슈
 - 방 이름은 대소문자를 구분합니다
