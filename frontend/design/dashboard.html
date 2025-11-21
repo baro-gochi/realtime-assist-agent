@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AI Customer Service Assistant</title>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,typography"></script>
+<script>
+    tailwind.config = {
+      darkMode: "class",
+      theme: {
+        extend: {
+          colors: {
+            primary: "#4F46E5",
+            "background-light": "#F8FAFC",
+            "background-dark": "#18181B",
+            "card-light": "#FFFFFF",
+            "card-dark": "#27272A",
+            "text-light-primary": "#18181B",
+            "text-dark-primary": "#F8FAFC",
+            "text-light-secondary": "#64748B",
+            "text-dark-secondary": "#A1A1AA",
+            "border-light": "#E2E8F0",
+            "border-dark": "#3F3F46",
+          },
+          fontFamily: {
+            display: ["Roboto", "sans-serif"],
+          },
+          borderRadius: {
+            DEFAULT: "0.5rem",
+          },
+        },
+      },
+    };
+  </script>
+<style>
+    body {
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+  </style>
+</head>
+<body class="font-display bg-background-light dark:bg-background-dark text-text-light-primary dark:text-text-dark-primary">
+<div class="flex flex-col h-screen">
+<header class="flex-shrink-0 bg-card-light dark:bg-card-dark border-b border-border-light dark:border-border-dark shadow-sm">
+<div class="container mx-auto px-6 py-4 flex justify-between items-center">
+<h1 class="text-xl font-bold text-text-light-primary dark:text-text-dark-primary">AI 상담 어시스턴트 (v1.0)</h1>
+<div class="flex items-center space-x-4 text-sm text-text-light-secondary dark:text-text-dark-secondary">
+<span>김상담 (Agent)</span>
+<div class="flex items-center space-x-2">
+<span class="relative flex h-2 w-2">
+<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+<span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+</span>
+<span>통화 중 (03:12)</span>
+</div>
+</div>
+</div>
+</header>
+<main class="flex-grow container mx-auto p-6 grid grid-cols-12 gap-6">
+<aside class="col-span-12 lg:col-span-3 flex flex-col space-y-6">
+<div class="bg-card-light dark:bg-card-dark p-6 rounded-lg shadow-sm border border-border-light dark:border-border-dark">
+<h2 class="text-lg font-bold text-primary mb-4">고객 정보</h2>
+<div class="space-y-3 text-sm">
+<div class="flex justify-between">
+<span class="text-text-light-secondary dark:text-text-dark-secondary">고객명</span>
+<span class="font-medium">이고객</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-light-secondary dark:text-text-dark-secondary">고객 등급</span>
+<span class="font-medium text-amber-500">VIP (Gold)</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-light-secondary dark:text-text-dark-secondary">연락처</span>
+<span class="font-medium">010-1234-5678</span>
+</div>
+<div class="flex justify-between">
+<span class="text-text-light-secondary dark:text-text-dark-secondary">최근 문의</span>
+<span class="font-medium">2025-11-03 (배송)</span>
+</div>
+</div>
+</div>
+<div class="bg-card-light dark:bg-card-dark p-6 rounded-lg shadow-sm border border-border-light dark:border-border-dark flex-grow">
+<h2 class="text-lg font-bold text-primary mb-4">과거 상담 이력 (총 3건)</h2>
+<div class="space-y-5">
+<div class="text-sm">
+<p class="font-medium text-text-light-primary dark:text-text-dark-primary">2025-11-03: 배송 지연 문의</p>
+<p class="text-text-light-secondary dark:text-text-dark-secondary mt-1">"상품이 아직 도착하지 않았습니다."</p>
+<p class="text-xs text-text-light-secondary dark:text-text-dark-secondary mt-1">담당: 박상담</p>
+</div>
+<hr class="border-border-light dark:border-border-dark"/>
+<div class="text-sm">
+<p class="font-medium text-text-light-primary dark:text-text-dark-primary">2025-10-20: 결제 오류</p>
+<p class="text-text-light-secondary dark:text-text-dark-secondary mt-1">"카드로하려 하는데 결제가 안돼요."</p>
+<p class="text-xs text-text-light-secondary dark:text-text-dark-secondary mt-1">담당: 김상담</p>
+</div>
+<hr class="border-border-light dark:border-border-dark"/>
+<div class="text-sm">
+<p class="font-medium text-text-light-primary dark:text-text-dark-primary">2025-09-15: 회원가입 문의</p>
+<p class="text-text-light-secondary dark:text-text-dark-secondary mt-1">"아이디가 기억나지 않습니다."</p>
+<p class="text-xs text-text-light-secondary dark:text-text-dark-secondary mt-1">담당: 김상담</p>
+</div>
+</div>
+</div>
+</aside>
+<section class="col-span-12 lg:col-span-5 flex flex-col space-y-6">
+<div class="bg-card-light dark:bg-card-dark p-6 rounded-lg shadow-sm border border-border-light dark:border-border-dark">
+<h2 class="text-lg font-bold text-primary mb-4">실시간 통화 요약</h2>
+<p class="text-sm leading-relaxed text-text-light-secondary dark:text-text-dark-secondary">고객이 '<span class="text-text-light-primary dark:text-text-dark-primary font-medium">갤럭시 Z 플립 7</span>' 모델의 재고 현황 및 예약 가능 여부를 문의 중입니다. 특히 '<span class="text-text-light-primary dark:text-text-dark-primary font-medium">글래시어 블루</span>' 색상에 관심이 많으며, 예약 구매 시 혜택에 대해 궁금해합니다.</p>
+</div>
+<div class="bg-card-light dark:bg-card-dark p-6 rounded-lg shadow-sm border border-border-light dark:border-border-dark flex-grow">
+<h2 class="text-lg font-bold text-primary mb-4">실시간 대화</h2>
+<div class="space-y-4 text-sm">
+<p><span class="font-bold text-blue-600 dark:text-blue-400">[고객]</span> 네, 안녕하세요. 갤럭시 Z 플립 7 재고 문의 좀 하려구요.</p>
+<p><span class="font-bold text-emerald-600 dark:text-emerald-400">[상담사]</span> 네, 고객님. 안녕하세요. 어떤 모델 찾으시나요?</p>
+<p><span class="font-bold text-blue-600 dark:text-blue-400">[고객]</span> 그... 글래시어 블루 색상 있나요? 그게 제일 인기 많다던데.</p>
+<div class="text-center my-2">
+<span class="text-xs bg-indigo-100 dark:bg-indigo-900 text-indigo-600 dark:text-indigo-300 px-3 py-1 rounded-full">AI가 'Z플립7 재고' 관련 정보를 탐색중입니다...</span>
+</div>
+<p><span class="font-bold text-emerald-600 dark:text-emerald-400">[상담사]</span> 네, 잠시만 기다려주시겠어요? 글래시어 블루 색상 재고 확인해 보겠습니다.</p>
+<p><span class="font-bold text-blue-600 dark:text-blue-400">[고객]</span> 혹시 예약하면 혜택 같은 것도 있나요?</p>
+</div>
+</div>
+</section>
+<aside class="col-span-12 lg:col-span-4 flex flex-col space-y-6">
+<div class="bg-indigo-50 dark:bg-indigo-900/50 border border-indigo-200 dark:border-indigo-800 p-6 rounded-lg shadow-sm">
+<h2 class="text-lg font-bold text-primary mb-4">AI 추천 답변 (RAG)</h2>
+<div class="space-y-4 text-sm">
+<p class="bg-card-light dark:bg-card-dark p-4 rounded-md shadow-sm">"네, 고객님. '<span class="font-medium text-text-light-primary dark:text-text-dark-primary">갤럭시 Z 플립 7 글래시어 블루</span>' 모델은 현재 인기가 많아 실시간 재고 변동이 큽니다. 즉시 예약 가능하며, 지금 예약하시면 <span class="font-medium text-text-light-primary dark:text-text-dark-primary">3일 이내</span> 수령 가능하십니다."</p>
+<p class="bg-card-light dark:bg-card-dark p-4 rounded-md shadow-sm">"예약 구매 시 '<span class="font-medium text-text-light-primary dark:text-text-dark-primary">무선 이어버드</span>'와 '<span class="font-medium text-text-light-primary dark:text-text-dark-primary">5만원 할인 쿠폰</span>'이 지급되는 프로모션이 진행 중입니다."</p>
+<button class="text-primary text-sm font-medium hover:underline">스크립트 복사</button>
+</div>
+</div>
+<div class="bg-card-light dark:bg-card-dark p-6 rounded-lg shadow-sm border border-border-light dark:border-border-dark flex-grow">
+<div>
+<div class="border-b border-border-light dark:border-border-dark mb-4">
+<nav aria-label="Tabs" class="-mb-px flex space-x-6">
+<a class="whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-primary text-primary" href="#">연관 FAQ (2)</a>
+<a class="whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-transparent text-text-light-secondary dark:text-text-dark-secondary hover:text-text-light-primary dark:hover:text-text-dark-primary hover:border-gray-300 dark:hover:border-gray-500" href="#">상품 정보 (1)</a>
+<a class="whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-transparent text-text-light-secondary dark:text-text-dark-secondary hover:text-text-light-primary dark:hover:text-text-dark-primary hover:border-gray-300 dark:hover:border-gray-500" href="#">업무 절차 (1)</a>
+</nav>
+</div>
+<div class="space-y-4 text-sm">
+<div>
+<h3 class="font-bold text-text-light-primary dark:text-text-dark-primary">Q. 예약 구매 시 혜택이 있나요?</h3>
+<p class="text-text-light-secondary dark:text-text-dark-secondary mt-1">A. 네, 예약 구매 고객께는 '무선 이어버드'와 '5만원 할인 쿠폰'이 제공됩니다. (~11/30)</p>
+</div>
+<div>
+<h3 class="font-bold text-text-light-primary dark:text-text-dark-primary">Q. 재고가 없으면 예약은 안되나요?</h3>
+<p class="text-text-light-secondary dark:text-text-dark-secondary mt-1">A. 재고가 소진되어도 '대기 예약'이 가능하며, 입고 시 순차적으로 연락드립니다. 대기 예약은 혜택이 다를 수 있습니다.</p>
+</div>
+</div>
+</div>
+</div>
+</aside>
+</main>
+</div>
+
+</body></html>

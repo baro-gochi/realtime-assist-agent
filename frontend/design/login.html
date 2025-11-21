@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Login - AI Customer Service Assistant</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com" rel="preconnect"/>
+<link crossorigin="" href="https://fonts.gstatic.com" rel="preconnect"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet"/>
+<script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            colors: {
+              "primary": "#197fe6",
+              "background-light": "#f6f7f8",
+              "background-dark": "#111921",
+            },
+            fontFamily: {
+              "display": ["Inter", "sans-serif"]
+            },
+            borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+          },
+        },
+      }
+    </script>
+<style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark font-display text-slate-800 dark:text-slate-200">
+<div class="relative flex min-h-screen w-full flex-col group/design-root" style='font-family: Inter, "Noto Sans", sans-serif;'>
+<div class="flex h-full grow flex-col">
+<div class="flex flex-1">
+<div class="flex w-full flex-col items-stretch md:flex-row">
+<div class="hidden md:flex md:w-1/2 lg:w-3/5 xl:w-1/2 items-center justify-center p-8 bg-slate-100 dark:bg-slate-900/50">
+<div class="max-w-md w-full">
+<img class="rounded-xl object-cover w-full h-full" data-alt="Abstract gradient with blue and purple hues forming wave-like patterns." src="https://lh3.googleusercontent.com/aida-public/AB6AXuCrSGixpgTZCRCvKYv9dEpNG1yhb3N2G63nmR--KHSywLqy6C1208_7T-Z5_pLVW0bY1eD1F17mBezxEvAEySJDpRR7OX3zi45KO5TF5B8aDTpnacpn4e5MZHGf-epMJuX1sWOGOpIEewg4IDlH0WB5BXyQ3WRPydQ86BMSZ4MZaYk6rqN-dSJD06gy3QvvjupHg5Pf_7gejux2PW66LJbbrpTs0cfPQ4nmTu6MtFLQYhqngEH33JVThauQb4w2mWI3ER0Ftx2AHewy"/>
+</div>
+</div>
+<div class="flex w-full md:w-1/2 lg:w-2/5 xl:w-1/2 flex-col items-center justify-center px-6 py-12 lg:px-16 xl:px-24">
+<div class="flex w-full max-w-md flex-col items-stretch">
+<div class="flex flex-col items-center pb-8">
+<div class="flex items-center gap-3">
+<span class="material-symbols-outlined text-primary text-4xl">support_agent</span>
+<span class="text-2xl font-bold text-slate-900 dark:text-white">AssistantAI</span>
+</div>
+</div>
+<div class="flex flex-col items-stretch">
+<div class="flex flex-col">
+<h1 class="text-[#0e141b] dark:text-white tracking-light text-[32px] font-bold leading-tight text-left pb-3">Welcome Back</h1>
+<p class="text-slate-600 dark:text-slate-400 text-base font-normal leading-normal pb-6">Log in to your Account to continue</p>
+</div>
+<div class="flex flex-col gap-4">
+<label class="flex flex-col flex-1">
+<p class="text-[#0e141b] dark:text-white text-base font-medium leading-normal pb-2">Username</p>
+<input class="form-input flex w-full min-w-0 flex-1 resize-none overflow-hidden rounded-lg text-[#0e141b] dark:text-white focus:outline-0 focus:ring-2 focus:ring-primary/50 border border-slate-300 dark:border-slate-700 bg-background-light dark:bg-background-dark h-14 placeholder:text-slate-400 dark:placeholder:text-slate-500 p-[15px] text-base font-normal leading-normal" placeholder="Enter your username" value=""/>
+</label>
+<label class="flex flex-col flex-1">
+<p class="text-[#0e141b] dark:text-white text-base font-medium leading-normal pb-2">Password</p>
+<div class="relative flex w-full flex-1 items-stretch">
+<input class="form-input flex w-full min-w-0 flex-1 resize-none overflow-hidden rounded-lg text-[#0e141b] dark:text-white focus:outline-0 focus:ring-2 focus:ring-primary/50 border border-slate-300 dark:border-slate-700 bg-background-light dark:bg-background-dark h-14 placeholder:text-slate-400 dark:placeholder:text-slate-500 p-[15px] pr-12 text-base font-normal leading-normal" placeholder="Enter your password" type="password" value=""/>
+<button class="absolute inset-y-0 right-0 flex items-center pr-4 text-slate-400 dark:text-slate-500 hover:text-primary dark:hover:text-primary">
+<span class="material-symbols-outlined">visibility</span>
+</button>
+</div>
+</label>
+</div>
+<div class="flex justify-end pt-3">
+<a class="text-primary text-sm font-medium leading-normal underline hover:text-primary/80" href="#">Forgot Password?</a>
+</div>
+<div class="pt-8">
+<button class="flex h-14 w-full items-center justify-center rounded-lg bg-primary px-6 text-base font-medium leading-6 text-white shadow-sm hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 dark:focus:ring-offset-background-dark">Log In</button>
+</div>
+</div>
+<div class="pt-12 text-center">
+<p class="text-slate-500 dark:text-slate-400 text-sm font-normal leading-normal">© 2024 AssistantAI. All rights reserved.</p>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</body></html>
