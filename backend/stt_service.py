@@ -465,7 +465,11 @@ class STTService:
                 result_queue.put(None)
 
             except Exception as e:
-                logger.error(f"Error in STT v2 processing: {e}", exc_info=True)
+                # Google STT API의 스트림 제한 도달 시 500 에러 발생 (정상적인 종료)
+                if "500" in str(e) or "Internal error" in str(e):
+                    logger.info(f"🔄 STT stream limit reached (normal behavior), will restart: {e}")
+                else:
+                    logger.error(f"❌ Unexpected STT error: {e}", exc_info=True)
                 result_queue.put(None)
 
         try:

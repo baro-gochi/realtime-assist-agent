@@ -330,6 +330,25 @@ export class WebRTCClient {
         }
         break;
 
+      case 'agent_ready':
+        console.log('🤖 Agent ready:', data);
+        if (this.onAgentReady) {
+          this.onAgentReady(data);
+        }
+        break;
+
+      case 'agent_update':
+        console.log('🤖 Agent update received - full message:', message);
+        console.log('🤖 Agent update - node:', message.node, 'data:', message.data);
+        if (this.onAgentUpdate) {
+          // node와 data를 모두 포함한 객체 전달
+          this.onAgentUpdate({
+            node: message.node,
+            data: message.data
+          });
+        }
+        break;
+
       case 'error':
         console.error('Server error:', data.message);
         if (this.onError) this.onError(new Error(data.message));

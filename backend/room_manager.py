@@ -236,6 +236,10 @@ class RoomManager:
                 # Save transcript to file before deleting room
                 self._save_transcript_to_file(room_name)
 
+                # Clean up agent for this room
+                from agent_manager import remove_agent
+                remove_agent(room_name)
+
                 # Clean up room data
                 del self.rooms[room_name]
                 if room_name in self.room_transcripts:
@@ -448,7 +452,7 @@ class RoomManager:
             room_name (str): 저장할 룸의 이름
 
         Note:
-            - 파일은 transcripts/ 디렉토리에 저장됨
+            - 파일은 data/transcripts/ 디렉토리에 저장됨
             - 파일명: room_{room_name}_{timestamp}.txt
             - 포맷: [시:분:초] 이름: 메시지
         """
@@ -457,13 +461,13 @@ class RoomManager:
             logger.info(f"No transcripts to save for room '{room_name}'")
             return
 
-        # Create transcripts directory if not exists
-        os.makedirs("transcripts", exist_ok=True)
+        # Create data/transcripts directory if not exists
+        os.makedirs("data/transcripts", exist_ok=True)
 
         # Generate filename with timestamp
         end_time = datetime.now()
         filename = f"room_{room_name}_{end_time.strftime('%Y%m%d_%H%M%S')}.txt"
-        filepath = os.path.join("transcripts", filename)
+        filepath = os.path.join("data", "transcripts", filename)
 
         # Get room start time
         start_timestamp = self.room_start_times.get(room_name, transcripts[0].timestamp)
