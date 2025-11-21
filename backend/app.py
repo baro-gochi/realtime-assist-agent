@@ -63,6 +63,7 @@ from typing import Dict
 
 from peer_manager import PeerConnectionManager
 from room_manager import RoomManager
+from agent_manager import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -107,13 +108,12 @@ app = FastAPI(title="WebRTC Signaling Server with Rooms", lifespan=lifespan)
 origins = [
     "http://localhost:3000",
     "https://my-dev-webrtc.loca.lt",
-    "http://172.30.1.56:3000",
 ]
 
-# CORS
+# CORS - 개발 환경에서는 모든 로컬 네트워크 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # In production, specify exact origins
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -199,6 +199,19 @@ async def get_rooms():
                 }
             ]
         }
+    """
+    return {"rooms": room_manager.get_room_list()}
+
+
+@app.get("/api/rooms")
+async def get_rooms_api():
+    """활성화된 모든 룸의 목록을 조회합니다 (API 엔드포인트).
+
+    /rooms와 동일한 기능을 제공하며, Vite 프록시 설정과 호환됩니다.
+    프론트엔드에서 /api 경로를 통해 접근할 수 있습니다.
+
+    Returns:
+        dict: 룸 목록을 포함하는 딕셔너리 (/rooms와 동일한 형식)
     """
     return {"rooms": room_manager.get_room_list()}
 
@@ -410,7 +423,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Register callback for STT transcript
     async def on_transcript(peer_id: str, room_name: str, transcript: str):
-        """STT 인식 결과를 WebSocket을 통해 전송하는 콜백 함수.
+        """STT 인식 결과를 WebSocket을 통해 전송하고 에이전트를 실행하는 콜백 함수.
 
         Args:
             peer_id (str): 음성을 전송한 피어의 ID
@@ -420,6 +433,7 @@ async def websocket_endpoint(websocket: WebSocket):
         Note:
             - 같은 룸의 모든 피어에게 브로드캐스트
             - 메시지 형식: {"type": "transcript", "data": {...}}
+            - LangGraph 에이전트 실행하여 실시간 요약 생성
         """
         logger.info(f"💬 Transcript from {peer_id} in room '{room_name}': {transcript}")
 
@@ -429,7 +443,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # Save transcript to room history
         import time
-        room_manager.add_transcript(peer_id, room_name, transcript, timestamp=time.time())
+        current_time = time.time()
+        room_manager.add_transcript(peer_id, room_name, transcript, timestamp=current_time)
 
         # Broadcast transcript to all peers in room
         await broadcast_to_room(
@@ -440,10 +455,51 @@ async def websocket_endpoint(websocket: WebSocket):
                     "peer_id": peer_id,
                     "nickname": nickname,
                     "text": transcript,
-                    "timestamp": time.time()
+                    "timestamp": current_time
                 }
             }
         )
+
+        # 🤖 LangGraph 에이전트 실행 (실시간 요약 생성)
+        try:
+            agent = room_agents.get(room_name)
+
+            if not agent:
+                logger.warning(f"⚠️ No agent found for room '{room_name}', skipping summary")
+                return
+
+            logger.info(f"🤖 Running agent for room '{room_name}'")
+            logger.info(f"📞 Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
+
+            # 스트리밍 모드로 에이전트 실행
+            chunk_count = 0
+            async for chunk in agent.on_new_transcript(peer_id, nickname, transcript, current_time):
+                chunk_count += 1
+                logger.info(f"🔔 Received chunk #{chunk_count} from agent")
+
+                # 각 노드의 업데이트를 즉시 브로드캐스트
+                node_name = list(chunk.keys())[0] if chunk else None
+                node_data = list(chunk.values())[0] if chunk else {}
+
+                logger.info(f"📦 Chunk details - node_name: {node_name}, node_data keys: {list(node_data.keys()) if node_data else 'None'}")
+
+                if node_name:
+                    logger.info(f"📤 Broadcasting agent update: {node_name}")
+                    logger.info(f"📡 Message to broadcast: type=agent_update, node={node_name}, data={node_data}")
+                    await broadcast_to_room(
+                        room_name,
+                        {
+                            "type": "agent_update",
+                            "node": node_name,
+                            "data": node_data
+                        }
+                    )
+                    logger.info(f"✅ Broadcast completed")
+
+            logger.info(f"🏁 Agent streaming finished. Total chunks: {chunk_count}")
+
+        except Exception as e:
+            logger.error(f"❌ Agent execution failed: {e}", exc_info=True)
 
     peer_manager.on_transcript_callback = on_transcript
 
@@ -468,6 +524,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Join room
                 room_manager.join_room(room_name, peer_id, nickname, websocket)
                 current_room = room_name
+
+                # 🤖 방 생성/입장 시 에이전트 생성
+                logger.info(f"🤖 Creating/getting agent for room '{room_name}'")
+                agent = get_or_create_agent(room_name)
+                logger.info(f"✅ Agent ready for room '{room_name}'")
+
+                # 에이전트 준비 완료 알림 전송
+                await broadcast_to_room(
+                    room_name,
+                    {
+                        "type": "agent_ready",
+                        "data": {
+                            "llm_available": agent.llm_available
+                        }
+                    }
+                )
 
                 # Get other peers in room
                 other_peers = room_manager.get_other_peers(room_name, peer_id)
