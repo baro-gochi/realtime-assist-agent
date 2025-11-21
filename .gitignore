@@ -41,3 +41,4 @@ gcloud-keys/*.json
 
 #data
 !data/.gitkeep
+data/
