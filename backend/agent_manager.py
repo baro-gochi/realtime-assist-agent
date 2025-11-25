@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # LLM 모델 설정 (모든 에이전트가 공유)
-LLM_MODEL = "openai:gpt-5-mini"
+LLM_MODEL = "openai:gpt-5-nano"
 
 
 
@@ -56,26 +56,30 @@ class RoomAgent:
         logger.info(f"🤖 Initializing LLM: {LLM_MODEL}")
 
         try:
-            # LLM 초기화 with 시스템 프롬프트 (한 번만 설정, 이후 재사용)
-            base_llm = init_chat_model(LLM_MODEL)
+            # TTFT 최적화: temperature=0 (Greedy Search)
+            # - temperature=0: 가장 확률 높은 토큰만 선택하여 샘플링 시간 최소화
+            # - max_completion_tokens=150: GPT-5에서는 max_tokens 대신 이걸 사용
+            # - reasoning_effort="minimal": 간단한 요약에는 minimal reasoning으로 빠르게
+            # - streaming=True: 첫 토큰 즉시 반환
+            llm = init_chat_model(
+                LLM_MODEL,
+                temperature=0,
+                max_completion_tokens=150,
+                reasoning_effort="minimal",
+                streaming=True
+            )
 
-            # 시스템 프롬프트를 LLM에 bind (매 호출마다 자동 포함)
-            system_message = {
-                "role": "system",
-                "content": """고객 상담 대화를 1-3문장으로 간결하게 요약하세요.
+            # 시스템 메시지 (Runtime Context로 전달할 내용)
+            self.system_message = """고객 상담 대화를 1문장으로 개조식으로 매우 간단하게 요약하세요.
 예시: 고객이 환불을 요청함.
 고객의 주요 문의사항과 상담사의 대응을 포함하세요."""
-            }
 
-            # bind를 사용하여 시스템 프롬프트를 LLM에 고정
-            llm = base_llm.bind(system=[system_message])
-
-            logger.info("✅ LLM initialized with system prompt binding")
+            logger.info("✅ LLM initialized successfully")
         except Exception as e:
             logger.error(f"❌ LLM initialization failed: {e}")
-            logger.warning("⚠️ Server will start without LLM - room connections and STT will work, but summaries will fail")
             llm = None
-            
+            self.system_message = None
+
         self.room_name = room_name
         self.llm_available = llm is not None
 
@@ -88,7 +92,8 @@ class RoomAgent:
         self.state: ConversationState = {
             "room_name": room_name,
             "conversation_history": [],
-            "current_summary": ""
+            "current_summary": "",
+            "messages": []  # MessagesState 필수 필드
         }
 
         logger.info(f"🤖 RoomAgent created for room: {room_name}")
@@ -138,12 +143,13 @@ class RoomAgent:
             logger.warning(f"⚠️ LLM not available - skipping summary generation for room '{self.room_name}'")
             return
 
-        # LangGraph 스트리밍 실행
+        # LangGraph 스트리밍 실행 (Runtime Context로 시스템 메시지 전달)
         logger.info(f"🚀 Starting graph.astream for room '{self.room_name}'")
         try:
             async for chunk in self.graph.astream(
                 self.state,
-                stream_mode="updates"  # 변경된 부분만 스트리밍
+                stream_mode="updates",  # 변경된 부분만 스트리밍
+                context={"system_message": self.system_message}  # Runtime Context 전달
             ):
                 logger.info(f"📤 Agent stream chunk received: {list(chunk.keys())}")
                 logger.info(f"📦 Chunk content: {chunk}")
@@ -188,7 +194,8 @@ class RoomAgent:
         self.state = {
             "room_name": self.room_name,
             "conversation_history": [],
-            "current_summary": ""
+            "current_summary": "",
+            "messages": []  # MessagesState 필수 필드
         }
 
 

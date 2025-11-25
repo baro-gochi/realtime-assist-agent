@@ -465,9 +465,12 @@ class STTService:
                 result_queue.put(None)
 
             except Exception as e:
-                # Google STT API의 스트림 제한 도달 시 500 에러 발생 (정상적인 종료)
-                if "500" in str(e) or "Internal error" in str(e):
-                    logger.info(f"🔄 STT stream limit reached (normal behavior), will restart: {e}")
+                # Google STT API의 스트림 자동 종료 (정상적인 동작)
+                # 499 CANCELLED: Google이 스트림을 자동으로 닫음
+                # 500 Internal error: 스트림 제한 시간 도달
+                if ("499" in str(e) or "CANCELLED" in str(e).upper() or
+                    "500" in str(e) or "Internal error" in str(e)):
+                    logger.info(f"🔄 STT stream ended (normal behavior), will restart: {e}")
                 else:
                     logger.error(f"❌ Unexpected STT error: {e}", exc_info=True)
                 result_queue.put(None)
