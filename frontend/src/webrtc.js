@@ -516,28 +516,27 @@ export class WebRTCClient {
    * - 상대방이 answer로 응답함
    */
   async createPeerConnection() {
-    // Use prefetched TURN credentials or fetch if not available
+    // Use prefetched TURN credentials from AWS coturn or fetch if not available
     let iceServers = [
-      // STUN servers (always available, no auth needed)
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun.relay.metered.ca:80' }
+      // Google STUN server (backup)
+      { urls: 'stun:stun.l.google.com:19302' }
     ];
 
-    // Use cached TURN credentials if available
+    // Use cached AWS coturn credentials if available
     if (this.turnServers) {
       iceServers = iceServers.concat(this.turnServers);
-      console.log('✅ Using prefetched TURN credentials');
+      console.log('✅ Using prefetched AWS coturn credentials');
     } else {
-      console.warn('⚠️ TURN credentials not prefetched yet, using STUN only');
+      console.warn('⚠️ AWS coturn credentials not prefetched yet, using Google STUN only');
       console.warn('💡 TIP: Connection may fail behind strict NAT/firewall');
     }
 
     // Create RTCPeerConnection with fetched ICE servers
-    // CRITICAL: Force relay mode to bypass localtunnel UDP limitations
-    // All media traffic will go through TURN servers
+    // Use all available connection methods (STUN + TURN)
+    // TURN will be preferred if available, but STUN is fallback
     this.pc = new RTCPeerConnection({
-      iceServers,
-      iceTransportPolicy: 'relay'  // Force TURN relay, bypass P2P
+      iceServers
+      // iceTransportPolicy: 'all' (default) - allows both direct and relayed connections
     });
 
     // Add local tracks to peer connection

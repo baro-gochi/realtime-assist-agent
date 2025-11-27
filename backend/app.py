@@ -220,68 +220,67 @@ async def get_rooms_api():
 async def get_turn_credentials():
     """TURN 서버 credentials를 Frontend에 안전하게 제공합니다.
 
-    Metered.ca API를 통해 TURN 서버 credentials를 가져와 클라이언트에 전달합니다.
-    이 엔드포인트는 Backend에서 API key를 관리하여 Frontend에서 민감한 정보가
+    AWS coturn 서버의 고정 credentials를 클라이언트에 전달합니다.
+    이 엔드포인트는 Backend에서 credentials를 관리하여 Frontend에서 민감한 정보가
     노출되지 않도록 합니다.
 
     Returns:
-        dict: TURN 서버 ICE server 설정 리스트 또는 에러 메시지
-            - 성공 시: Metered.ca API 응답 (ICE servers 배열)
+        list: TURN 서버 ICE server 설정 리스트 또는 에러 메시지
+            - 성공 시: ICE servers 배열 (STUN + TURN)
             - 실패 시: {"error": "에러 메시지"}
 
     Environment Variables:
-        METERED_API_KEY: Metered.ca API 인증 키
+        TURN_SERVER_URL: AWS coturn TURN 서버 URL
+        TURN_USERNAME: AWS coturn 사용자명
+        TURN_CREDENTIAL: AWS coturn 비밀번호
+        STUN_SERVER_URL: AWS coturn STUN 서버 URL (선택)
 
     Security:
-        - API key는 Backend 환경 변수에서만 관리
-        - Frontend에 API key 노출 방지
-        - Metered.ca 공식 보안 권장사항 준수
+        - Credentials는 Backend 환경 변수에서만 관리
+        - Frontend에 민감한 정보 직접 노출 방지
 
     Examples:
         성공 응답:
             [
                 {
-                    "urls": "turn:global.relay.metered.ca:80",
-                    "username": "...",
-                    "credential": "..."
+                    "urls": "stun:13.209.180.128:3478"
                 },
-                ...
+                {
+                    "urls": "turn:13.209.180.128:3478",
+                    "username": "username1",
+                    "credential": "password1"
+                }
             ]
 
         에러 응답:
             {"error": "TURN service not configured"}
-
-    See Also:
-        Metered.ca Docs: https://www.metered.ca/docs/turn-server-service/overview
     """
-    import httpx
     import os
 
-    metered_api_key = os.getenv("METERED_API_KEY")
-    if not metered_api_key:
-        logger.warning("METERED_API_KEY not set in environment")
+    turn_server_url = os.getenv("TURN_SERVER_URL")
+    turn_username = os.getenv("TURN_USERNAME")
+    turn_credential = os.getenv("TURN_CREDENTIAL")
+    stun_server_url = os.getenv("STUN_SERVER_URL")
+
+    if not turn_server_url or not turn_username or not turn_credential:
+        logger.warning("AWS coturn credentials not set in environment")
         return {"error": "TURN service not configured"}
 
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"https://my-dev-turnserver.metered.live/api/v1/turn/credentials?apiKey={metered_api_key}",
-                timeout=10.0
-            )
+    ice_servers = []
 
-            if response.status_code == 200:
-                logger.info("✅ TURN credentials fetched successfully from Metered.ca")
-                return response.json()
-            else:
-                logger.error(f"Failed to fetch TURN credentials: HTTP {response.status_code}")
-                return {"error": f"Failed to fetch TURN credentials: HTTP {response.status_code}"}
+    # STUN 서버 추가 (AWS coturn)
+    if stun_server_url:
+        ice_servers.append({"urls": stun_server_url})
 
-    except httpx.TimeoutException:
-        logger.error("Timeout while fetching TURN credentials from Metered.ca")
-        return {"error": "TURN service timeout"}
-    except Exception as e:
-        logger.error(f"Error fetching TURN credentials: {e}")
-        return {"error": "Failed to fetch TURN credentials"}
+    # TURN 서버 추가 (AWS coturn)
+    ice_servers.append({
+        "urls": turn_server_url,
+        "username": turn_username,
+        "credential": turn_credential
+    })
+
+    logger.info("✅ AWS coturn credentials provided to frontend")
+    return ice_servers
 
 
 @app.websocket("/ws")
@@ -484,14 +483,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(f"📦 Chunk details - node_name: {node_name}, node_data keys: {list(node_data.keys()) if node_data else 'None'}")
 
                 if node_name:
+                    # Filter out non-serializable fields (LangChain Message objects)
+                    # Keep only JSON-serializable fields like current_summary
+                    serializable_data = {
+                        k: v for k, v in node_data.items()
+                        if k != 'messages'  # Exclude messages field with HumanMessage objects
+                    }
+
                     logger.info(f"📤 Broadcasting agent update: {node_name}")
-                    logger.info(f"📡 Message to broadcast: type=agent_update, node={node_name}, data={node_data}")
+                    logger.info(f"📡 Serializable data keys: {list(serializable_data.keys())}")
                     await broadcast_to_room(
                         room_name,
                         {
                             "type": "agent_update",
                             "node": node_name,
-                            "data": node_data
+                            "data": serializable_data  # Only send JSON-serializable fields
                         }
                     )
                     logger.info(f"✅ Broadcast completed")

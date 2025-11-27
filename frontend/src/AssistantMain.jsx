@@ -51,6 +51,7 @@ function AssistantMain() {
   const [currentSummary, setCurrentSummary] = useState('');
   const [summaryTimestamp, setSummaryTimestamp] = useState(null); // 요약 수신 시간
   const [llmStatus, setLlmStatus] = useState('connecting'); // 'connecting' | 'ready' | 'connected' | 'failed'
+  const [isStreaming, setIsStreaming] = useState(false); // 스트리밍 중 여부
 
   // 비디오 refs
   const localVideoRef = useRef(null);
@@ -149,25 +150,33 @@ function AssistantMain() {
       }
     };
 
-    // AI 에이전트 업데이트 이벤트 핸들러
+    // AI 에이전트 업데이트 이벤트 핸들러 (스트리밍 지원)
     client.onAgentUpdate = (data) => {
       console.log('🤖 Agent update received:', data);
       // data.node: 노드 이름 (예: "summarize")
-      // data.data: 노드 출력 (예: {"current_summary": "..."})
+      // data.data: 노드 출력 (예: {"current_summary": "...", "is_streaming": true})
 
       // 에러 처리
       if (data.node === 'error') {
         setLlmStatus('failed');
+        setIsStreaming(false);
         console.error('❌ LLM error:', data.data.message);
         return;
       }
 
-      // 정상 요약 수신
+      // 정상 요약 수신 (스트리밍 각 청크마다 업데이트)
       if (data.node === 'summarize' && data.data.current_summary) {
         setLlmStatus('connected');
-        setCurrentSummary(data.data.current_summary);
+        setCurrentSummary(data.data.current_summary); // 누적된 요약을 실시간 업데이트
         setSummaryTimestamp(Date.now()); // 요약 수신 시간 기록
-        console.log('✅ Summary updated:', data.data.current_summary.substring(0, 50) + '...');
+
+        // 스트리밍 상태 업데이트
+        if (data.data.is_streaming !== undefined) {
+          setIsStreaming(data.data.is_streaming);
+        }
+
+        console.log(`📝 Summary ${data.data.is_streaming ? 'streaming' : 'completed'}:`,
+                    data.data.current_summary.substring(0, 50) + '...');
       }
     };
 
@@ -680,7 +689,12 @@ function AssistantMain() {
             <p className="summary-text">
               {llmStatus === 'connecting' && 'LLM 연결 중...'}
               {llmStatus === 'ready' && '✅ 요약 대기 중 (대화 시작 시 실시간 요약 생성)'}
-              {llmStatus === 'connected' && currentSummary}
+              {llmStatus === 'connected' && (
+                <>
+                  {currentSummary}
+                  {isStreaming && <span className="streaming-cursor">▊</span>}
+                </>
+              )}
               {llmStatus === 'failed' && '❌ LLM 연결 실패: 요약 기능을 사용할 수 없습니다. (STT는 정상 동작)'}
             </p>
           </div>

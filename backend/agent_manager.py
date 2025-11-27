@@ -144,24 +144,47 @@ class RoomAgent:
             return
 
         # LangGraph 스트리밍 실행 (Runtime Context로 시스템 메시지 전달)
+        # stream_mode="messages": LLM의 각 토큰을 실시간으로 스트리밍
         logger.info(f"🚀 Starting graph.astream for room '{self.room_name}'")
+        summary_chunks = []  # 요약 청크를 누적
+
         try:
             async for chunk in self.graph.astream(
                 self.state,
-                stream_mode="updates",  # 변경된 부분만 스트리밍
+                stream_mode="messages",  # LLM 메시지 스트리밍
                 context={"system_message": self.system_message}  # Runtime Context 전달
             ):
-                logger.info(f"📤 Agent stream chunk received: {list(chunk.keys())}")
-                logger.info(f"📦 Chunk content: {chunk}")
+                # chunk는 (message, metadata) 튜플 형태
+                message, metadata = chunk
+                logger.debug(f"📤 Message chunk received: {message}")
 
-                # State 동기화 (업데이트된 내용을 State에 반영)
-                for node_name, node_output in chunk.items():
-                    for key, value in node_output.items():
-                        self.state[key] = value
-                        logger.debug(f"  ✅ State updated: {key} = {str(value)[:100]}...")
+                # AIMessage의 content만 추출
+                if hasattr(message, 'content') and message.content:
+                    content = message.content
+                    summary_chunks.append(content)
 
-                # 업데이트 yield
-                yield chunk
+                    # 현재까지 누적된 요약을 State에 반영
+                    current_summary = "".join(summary_chunks)
+                    self.state["current_summary"] = current_summary
+
+                    # 각 청크를 즉시 yield (프론트엔드로 스트리밍)
+                    yield {
+                        "summarize": {
+                            "current_summary": current_summary,
+                            "is_streaming": True  # 스트리밍 중임을 표시
+                        }
+                    }
+
+            # 스트리밍 완료 표시
+            if summary_chunks:
+                final_summary = "".join(summary_chunks)
+                self.state["current_summary"] = final_summary
+                yield {
+                    "summarize": {
+                        "current_summary": final_summary,
+                        "is_streaming": False  # 스트리밍 완료
+                    }
+                }
 
         except Exception as e:
             logger.error(f"❌ Error in agent execution: {e}", exc_info=True)

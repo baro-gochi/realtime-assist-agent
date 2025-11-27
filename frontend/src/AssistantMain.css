@@ -778,3 +778,21 @@
 .faq-list::-webkit-scrollbar-thumb:hover {
   background: #CBD5E1;
 }
+
+/* 스트리밍 커서 애니메이션 */
+.streaming-cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--primary);
+  animation: blink 1s infinite;
+  font-weight: bold;
+}
+
+@keyframes blink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}

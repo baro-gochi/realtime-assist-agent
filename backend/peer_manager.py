@@ -288,49 +288,34 @@ class PeerConnectionManager:
         # ICE 서버 설정 (STUN/TURN)
         from aiortc import RTCConfiguration, RTCIceServer
         import os
-        import httpx
 
-        ice_servers = [
-            # STUN servers (Google + Metered.ca)
-            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urls=["stun:stun.relay.metered.ca:80"]),
-        ]
+        # AWS coturn 서버 설정 (Static credentials)
+        turn_server_url = os.getenv("TURN_SERVER_URL")
+        turn_username = os.getenv("TURN_USERNAME")
+        turn_credential = os.getenv("TURN_CREDENTIAL")
+        stun_server_url = os.getenv("STUN_SERVER_URL")
 
-        # TURN 서버 추가 - Metered.ca API에서 동적 크레덴셜 가져오기
-        metered_api_key = os.getenv("METERED_API_KEY")
-        if metered_api_key:
-            try:
-                # Fetch dynamic TURN credentials from Metered.ca API (same as frontend)
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"https://my-dev-turnserver.metered.live/api/v1/turn/credentials?apiKey={metered_api_key}",
-                        timeout=10.0
-                    )
+        ice_servers = []
 
-                    if response.status_code == 200:
-                        turn_servers = response.json()
+        # STUN 서버 추가 (AWS coturn + Google 백업)
+        if stun_server_url:
+            ice_servers.append(RTCIceServer(urls=[stun_server_url]))
+            logger.info(f"✅ AWS STUN server configured: {stun_server_url}")
 
-                        # Convert Metered.ca format to aiortc RTCIceServer format
-                        for server in turn_servers:
-                            # Skip STUN servers (already added)
-                            if server.get("urls", "").startswith("stun:"):
-                                continue
+        # Google STUN 서버 (백업용)
+        ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
 
-                            # Add TURN servers with credentials
-                            ice_servers.append(RTCIceServer(
-                                urls=[server["urls"]],
-                                username=server.get("username"),
-                                credential=server.get("credential")
-                            ))
-
-                        logger.info(f"✅ TURN servers configured with Metered.ca (dynamic credentials, {len(turn_servers)} servers)")
-                        logger.debug(f"TURN credentials - username: {turn_servers[1].get('username') if len(turn_servers) > 1 else 'N/A'}")
-                    else:
-                        logger.warning(f"⚠️ Failed to fetch TURN credentials from Metered.ca API: HTTP {response.status_code}")
-            except Exception as e:
-                logger.error(f"❌ Error fetching TURN credentials from Metered.ca API: {e}")
+        # TURN 서버 추가 (AWS coturn)
+        if turn_server_url and turn_username and turn_credential:
+            ice_servers.append(RTCIceServer(
+                urls=[turn_server_url],
+                username=turn_username,
+                credential=turn_credential
+            ))
+            logger.info(f"✅ AWS TURN server configured: {turn_server_url}")
+            logger.debug(f"TURN credentials - username: {turn_username}")
         else:
-            logger.warning("⚠️ METERED_API_KEY not found in .env - using STUN only")
+            logger.warning("⚠️ AWS TURN server credentials not found in .env - using STUN only")
 
         # aiortc doesn't support iceTransportPolicy parameter
         # Use both TURN (preferred) and STUN (fallback) servers
