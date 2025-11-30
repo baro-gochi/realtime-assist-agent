@@ -40,12 +40,18 @@ import os
 from typing import AsyncIterator, Optional, List
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
+from google.api_core.client_options import ClientOptions
+from google.protobuf.duration_pb2 import Duration
 from av import AudioFrame
 import numpy as np
 import queue
 import threading
 
 logger = logging.getLogger(__name__)
+
+# Google STT 최적화 상수
+TARGET_SAMPLE_RATE = 16000  # ElevenLabs와 동일하게 16kHz
+TARGET_CHUNK_DURATION = 0.25  # 250ms 청크 (ElevenLabs와 동일)
 
 
 class STTService:
@@ -106,33 +112,41 @@ class STTService:
             - 서비스 계정 키 파일 권한 확인 필요
             - v2 API는 Recognizer 개념 필수
         """
-        # Google Cloud 인증 및 프로젝트 확인
+        # Google Cloud 인증 및 프로젝트 확인 프로젝트 ID (v2에서 필수)
         if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
             logger.warning(
                 "GOOGLE_APPLICATION_CREDENTIALS not set. "
                 "STT service may not work properly."
             )
-
-        # 프로젝트 ID (v2에서 필수)
+            
         self.project_id = project_id or os.getenv("GOOGLE_CLOUD_PROJECT")
         if not self.project_id:
             raise ValueError(
                 "GOOGLE_CLOUD_PROJECT environment variable must be set for v2 API"
             )
 
-        # Initialize Google Cloud Speech v2 sync client
-        self.client = SpeechClient()
-
         # Configuration from environment or defaults
         default_language = os.getenv("STT_LANGUAGE_CODE", "ko-KR")
         self.language_codes = language_codes or [default_language]
 
         self.model = model or os.getenv("STT_MODEL", "short")
+        self.sample_rate = TARGET_SAMPLE_RATE
+        self.input_sample_rate = 48000  # WebRTC 입력 샘플레이트
 
-        # Recognizer path (v2에서 필수)
-        # '_'는 기본 recognizer를 사용한다는 의미
-        # v2에서는 global location 사용
-        self.location = "global"
+        # Location 설정 (리전별 엔드포인트 지원)
+        self.location = os.getenv("STT_LOCATION", "global")
+
+        # Regional endpoint 설정
+        if self.location != "global":
+            api_endpoint = f"{self.location}-speech.googleapis.com"
+            client_options = ClientOptions(api_endpoint=api_endpoint)
+            self.client = SpeechClient(client_options=client_options)
+            logger.info(f"🌏 Using regional endpoint: {api_endpoint}")
+        else:
+            self.client = SpeechClient()
+            logger.info("🌐 Using global endpoint: speech.googleapis.com")
+
+        # Recognizer path
         self.recognizer = f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
 
         self.enable_automatic_punctuation = (
@@ -141,11 +155,11 @@ class STTService:
             else os.getenv("STT_ENABLE_AUTOMATIC_PUNCTUATION", "true").lower() == "true"
         )
 
-        # Only send final results (not interim) for production use
+        # Enable interim results for real-time partial transcript display
         self.enable_interim_results = (
             enable_interim_results
             if enable_interim_results is not None
-            else os.getenv("STT_ENABLE_INTERIM_RESULTS", "false").lower() == "true"
+            else os.getenv("STT_ENABLE_INTERIM_RESULTS", "true").lower() == "true"
         )
 
         logger.info(
@@ -154,9 +168,36 @@ class STTService:
             f"location={self.location}, "
             f"languages={self.language_codes}, "
             f"model={self.model}, "
+            f"sample_rate={self.sample_rate}Hz, "
             f"punctuation={self.enable_automatic_punctuation}, "
             f"interim={self.enable_interim_results}"
         )
+
+    def _resample_audio(self, audio_array: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        """오디오를 목표 샘플레이트로 리샘플링합니다.
+
+        간단한 선형 보간 방식을 사용합니다.
+
+        Args:
+            audio_array: 원본 오디오 배열
+            orig_sr: 원본 샘플레이트
+            target_sr: 목표 샘플레이트
+
+        Returns:
+            리샘플링된 오디오 배열
+        """
+        if orig_sr == target_sr:
+            return audio_array
+
+        # 리샘플링 비율 계산
+        ratio = target_sr / orig_sr
+        new_length = int(len(audio_array) * ratio)
+
+        # 선형 보간으로 리샘플링
+        indices = np.linspace(0, len(audio_array) - 1, new_length)
+        resampled = np.interp(indices, np.arange(len(audio_array)), audio_array)
+
+        return resampled.astype(audio_array.dtype)
 
     def _create_streaming_config(self) -> cloud_speech.StreamingRecognitionConfig:
         """스트리밍 인식을 위한 Google STT v2 설정 생성.
@@ -170,12 +211,11 @@ class STTService:
             - model: latest_long 등
             - interim_results: 실시간 중간 결과 (False 권장 - 낮은 지연시간)
         """
-        # RecognitionConfig 생성 (v2 방식 - 명시적 인코딩)
         recognition_config = cloud_speech.RecognitionConfig(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                 encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
-                sample_rate_hertz=48000,  # WebRTC default
-                audio_channel_count=1,  # Mono
+                sample_rate_hertz=self.sample_rate,
+                audio_channel_count=1,
             ),
             language_codes=self.language_codes,
             model=self.model,
@@ -192,11 +232,14 @@ class STTService:
             config=recognition_config,
         )
 
-        # StreamingRecognitionFeatures 추가 (interim results 등)
-        if self.enable_interim_results:
-            streaming_config.streaming_features = cloud_speech.StreamingRecognitionFeatures(
-                interim_results=True
-            )
+        # StreamingRecognitionFeatures 추가 (interim results + voice activity timeout)
+        streaming_config.streaming_features = cloud_speech.StreamingRecognitionFeatures(
+            interim_results=self.enable_interim_results,
+            enable_voice_activity_events=True,
+            voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
+                speech_end_timeout=Duration(seconds=59),  # 발화 후 59초까지 스트림 유지
+            ),
+        )
 
         return streaming_config
 
@@ -237,8 +280,10 @@ class STTService:
         elif array.dtype == np.int16:
             # Apply gain to low volume audio
             max_val = np.abs(array).max()
-            if max_val > 0 and max_val < 5000:
-                gain = min(6500.0 / max_val, 20.0)
+            if max_val > 0 and max_val < 8000:
+                # Target: 30% of full range (~10000) for reliable STT recognition
+                target_level = 10000.0
+                gain = min(target_level / max_val, 150.0)  # Cap gain at 150x for very quiet audio
                 array = np.clip(array * gain, -32768, 32767).astype(np.int16)
 
         return array.tobytes()
@@ -246,7 +291,7 @@ class STTService:
     async def process_audio_stream(
         self,
         audio_queue: asyncio.Queue
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[dict]:
         """오디오 프레임 큐를 처리하여 텍스트로 변환.
 
         비동기 제너레이터로 연속적인 음성 인식 결과를 스트리밍합니다.
@@ -255,7 +300,10 @@ class STTService:
             audio_queue (asyncio.Queue): AudioFrame 객체를 담은 비동기 큐
 
         Yields:
-            str: 인식된 텍스트 (최종 결과만 또는 중간 결과 포함)
+            dict: 인식 결과
+                - transcript (str): 인식된 텍스트
+                - is_final (bool): 최종 결과 여부
+                - confidence (float): 신뢰도 점수
 
         Note:
             - 큐에서 None을 받으면 스트림 종료
@@ -308,7 +356,7 @@ class STTService:
         transfer_task = asyncio.create_task(transfer_frames())
 
         def generate_requests():
-            """동기 요청 생성기 (v2 방식)"""
+            """동기 요청 생성기 (v2 방식) - 250ms 청크 누적 전송"""
             # First request with recognizer and config
             logger.info("📤 Sending initial config request to STT API...")
             config_request = cloud_speech.StreamingRecognizeRequest(
@@ -318,18 +366,49 @@ class STTService:
             yield config_request
             logger.info("✅ Config request sent, waiting for audio frames...")
 
-            # Subsequent requests with audio data
+            # 🔧 ElevenLabs와 동일한 청크 누적 방식
             frame_count = 0
+            chunk_count = 0
+            accumulated_arrays = []
+            accumulated_duration = 0.0
             last_frame_time = None
-            silence_threshold = 2.0  # seconds of silence before closing
-            first_frame_timeout = 10.0  # Wait longer for first frame
+            silence_threshold = 30.0
+            first_frame_timeout = 60.0
+
+            def process_accumulated_chunks():
+                """누적된 오디오를 처리하여 전송"""
+                nonlocal chunk_count
+                if not accumulated_arrays:
+                    return None
+
+                # 모든 배열을 하나로 합침
+                combined_array = np.concatenate(accumulated_arrays)
+
+                # 48kHz → 16kHz 리샘플링 (ElevenLabs와 동일)
+                resampled = self._resample_audio(combined_array, self.input_sample_rate, self.sample_rate)
+                resampled = resampled.astype(np.int16)
+
+                chunk_count += 1
+                if chunk_count == 1:
+                    logger.info(f"📤 First 250ms chunk: {len(combined_array)} samples @ 48kHz → {len(resampled)} samples @ 16kHz")
+
+                audio_bytes = resampled.tobytes()
+                return audio_bytes
 
             while True:
                 try:
                     # Wait longer for first frame, shorter for subsequent frames
-                    timeout = first_frame_timeout if frame_count == 0 else 0.5
+                    timeout = first_frame_timeout if frame_count == 0 else 0.1
                     frame = sync_queue.get(timeout=timeout)
                 except queue.Empty:
+                    # 타임아웃 시 누적된 오디오가 있으면 전송
+                    if accumulated_arrays:
+                        audio_bytes = process_accumulated_chunks()
+                        if audio_bytes:
+                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                        accumulated_arrays = []
+                        accumulated_duration = 0.0
+
                     # Check if we should close stream due to prolonged silence
                     if last_frame_time is not None:
                         import time
@@ -344,7 +423,12 @@ class STTService:
                     continue
 
                 if frame is None:
-                    logger.info(f"🏁 Stream end signal received. Total frames sent: {frame_count}")
+                    # 스트림 종료 전 남은 오디오 전송
+                    if accumulated_arrays:
+                        audio_bytes = process_accumulated_chunks()
+                        if audio_bytes:
+                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                    logger.info(f"🏁 Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
                     break
 
                 # Update last frame time
@@ -353,66 +437,54 @@ class STTService:
 
                 frame_count += 1
                 if frame_count == 1:
-                    logger.info("📤 Sending first audio frame to STT API...")
+                    logger.info(f"🔍 AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
 
-                # Convert frame to bytes (sync version)
+                # Convert frame to numpy array
                 array = frame.to_ndarray()
 
-                # Debug: Log frame info on first frame
-                if frame_count == 1:
-                    logger.info(f"🔍 AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}, channels: {frame.layout.name}")
-                    logger.info(f"🔍 Original array - shape: {array.shape}, dtype: {array.dtype}")
-
-                # 🔧 FIX: Handle stereo to mono conversion properly
-                # First flatten if multi-dimensional
+                # 🔧 Handle stereo to mono conversion
                 if array.ndim > 1:
                     array = array.flatten()
 
-                # Check if size suggests stereo (should be 2x samples for interleaved L-R-L-R)
                 if array.size == frame.samples * 2:
-                    # Interleaved stereo: reshape to (samples, 2) and average channels
                     array = array.reshape(-1, 2).mean(axis=1).astype(array.dtype)
                     if frame_count == 1:
-                        logger.info(f"🔧 Converted stereo (interleaved) to mono: {frame.samples * 2} → {frame.samples} samples")
-
-                if frame_count == 1:
-                    logger.info(f"🔍 After conversion - shape: {array.shape}, dtype: {array.dtype}, min: {array.min()}, max: {array.max()}")
+                        logger.info(f"🔧 Converted stereo to mono")
 
                 # 🔧 Handle audio format conversion
                 if array.dtype == np.float32 or array.dtype == np.float64:
-                    # Float format (-1.0 to 1.0) - convert to int16
                     array = (array * 32767).astype(np.int16)
-                    if frame_count == 1:
-                        logger.info(f"🔧 Converted float to int16 - min: {array.min()}, max: {array.max()}")
                 elif array.dtype == np.int16:
-                    # 🔧 CRITICAL FIX: Apply gain to low volume audio
+                    # Apply gain to low volume audio
                     max_val = np.abs(array).max()
                     if max_val > 0 and max_val < 5000:
-                        # Audio is too quiet - apply gain
-                        # Target: 20% of full range (~6500) for good recognition
-                        gain = min(6500.0 / max_val, 20.0)  # Cap gain at 20x to avoid noise amplification
+                        gain = min(6500.0 / max_val, 20.0)
                         array = np.clip(array * gain, -32768, 32767).astype(np.int16)
-                        if frame_count == 1:
-                            logger.info(f"🔊 Applied gain {gain:.1f}x - new range: [{array.min()}, {array.max()}]")
 
-                audio_bytes = array.tobytes()
+                # 프레임 누적
+                accumulated_arrays.append(array)
+                frame_duration = frame.samples / frame.sample_rate
+                accumulated_duration += frame_duration
 
-                # Debug: Log first frame audio data
-                if frame_count == 1:
-                    chunk_size = len(audio_bytes)
-                    non_zero = np.count_nonzero(array)
-                    logger.info(f"🔍 Final audio - bytes: {chunk_size}, non-zero: {non_zero}/{array.size} ({100*non_zero/array.size:.1f}%), range: [{array.min()}, {array.max()}]")
+                # 250ms 이상 누적되면 전송 (ElevenLabs와 동일)
+                if accumulated_duration >= TARGET_CHUNK_DURATION:
+                    audio_bytes = process_accumulated_chunks()
+                    if audio_bytes:
+                        chunk_size = len(audio_bytes)
+                        if chunk_size > 25000:
+                            logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
+                            for i in range(0, len(audio_bytes), 24000):
+                                chunk = audio_bytes[i:i+24000]
+                                yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
+                        else:
+                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
 
-                chunk_size = len(audio_bytes)
-                if chunk_size > 25000:
-                    logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
-                    for i in range(0, len(audio_bytes), 24000):
-                        chunk = audio_bytes[i:i+24000]
-                        yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
-                else:
-                    if frame_count % 100 == 0:
-                        logger.debug(f"Sent frame #{frame_count} ({chunk_size} bytes)")
-                    yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                        if chunk_count % 40 == 0:  # ~10초마다 로그
+                            logger.info(f"📦 Sent {chunk_count} chunks to Google STT")
+
+                    # 누적 초기화
+                    accumulated_arrays = []
+                    accumulated_duration = 0.0
 
         # Result queue to get transcripts from thread
         result_queue = queue.Queue()
@@ -421,30 +493,31 @@ class STTService:
             """동기 STT 호출을 스레드에서 실행"""
             try:
                 logger.info(f"🎙️ Starting streaming recognition with recognizer: {self.recognizer}")
+                logger.info(f"🔗 API endpoint: {self.client._transport._host if hasattr(self.client, '_transport') else 'unknown'}")
 
+                logger.info("📡 Calling streaming_recognize()...")
                 responses_iterator = self.client.streaming_recognize(
                     requests=generate_requests()
                 )
+                logger.info("📡 streaming_recognize() returned iterator, starting to iterate...")
 
-                logger.info("✅ STT stream connection established, waiting for responses...")
-                logger.info("⏳ Waiting for STT API responses (this may take a few seconds)...")
-                logger.info("💡 TIP: Speak clearly and pause after each phrase to get results")
+                logger.info("⏳ Waiting for first response from STT API...")
 
                 response_count = 0
-                wait_logged = False
                 for response in responses_iterator:
-                    if not wait_logged and response_count == 0:
-                        logger.info("🎯 Entering response loop, waiting for first response...")
-                        wait_logged = True
+                    if response_count == 0:
+                        logger.info("✅ STT stream connection established, first response received!")
+                    else:
+                        logger.info(f"⏳ Received response after waiting...")
                     response_count += 1
                     logger.info(f"📨 Received response #{response_count} from STT API")
-                    logger.debug(f"Response type: {type(response)}, has results: {bool(response.results)}")
 
                     if not response.results:
-                        logger.debug(f"Response #{response_count} has no results, skipping...")
+                        logger.info(f"📭 Response #{response_count} has no results (empty)")
                         continue
 
                     result = response.results[0]
+                    logger.info(f"📬 Response #{response_count}: is_final={result.is_final}, alternatives={len(result.alternatives) if result.alternatives else 0}")
 
                     if result.is_final or self.enable_interim_results:
                         if result.alternatives:
@@ -457,11 +530,17 @@ class STTService:
                                 f"(confidence: {confidence:.2f})"
                             )
 
-                            # Only send final results to frontend (ignore interim)
-                            if result.is_final:
-                                result_queue.put(transcript)
+                            # Send both final and interim results with is_final flag
+                            result_queue.put({
+                                "transcript": transcript,
+                                "is_final": result.is_final,
+                                "confidence": confidence
+                            })
+
+                    logger.info(f"⏳ Waiting for response #{response_count + 1}...")
 
                 # Signal end of stream
+                logger.info(f"🏁 Response iterator ended. Total responses: {response_count}")
                 result_queue.put(None)
 
             except Exception as e:
@@ -484,10 +563,10 @@ class STTService:
             while True:
                 # Get result from queue (with timeout to check stop event)
                 try:
-                    transcript = await asyncio.to_thread(result_queue.get, timeout=0.1)
-                    if transcript is None:
+                    result = await asyncio.to_thread(result_queue.get, timeout=0.1)
+                    if result is None:
                         break
-                    yield transcript
+                    yield result  # dict with transcript, is_final, confidence
                 except queue.Empty:
                     if stop_event.is_set():
                         break

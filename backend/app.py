@@ -56,7 +56,9 @@ import logging
 import uuid
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import os
+from typing import Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Depends, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict
@@ -68,6 +70,31 @@ from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+# Access password for authentication
+ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "")
+
+
+async def verify_auth_header(authorization: Optional[str] = Header(None)) -> bool:
+    """Authorization 헤더를 검증합니다."""
+    if not ACCESS_PASSWORD:
+        return True
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    parts = authorization.split(" ")
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
+    if parts[1] != ACCESS_PASSWORD:
+        raise HTTPException(status_code=401, detail="Invalid password")
+    return True
+
+
+def verify_ws_token(token: Optional[str]) -> bool:
+    """WebSocket 연결 시 토큰을 검증합니다."""
+    if not ACCESS_PASSWORD:
+        return True
+    return token == ACCESS_PASSWORD
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -203,8 +230,27 @@ async def get_rooms():
     return {"rooms": room_manager.get_room_list()}
 
 
+@app.post("/api/auth/verify")
+async def verify_password(password: str = Form("")):
+    """비밀번호를 검증합니다.
+
+    프론트엔드에서 비밀번호 입력 후 검증 요청에 사용됩니다.
+
+    Args:
+        password: 검증할 비밀번호
+
+    Returns:
+        dict: 인증 결과 {"success": bool, "message": str}
+    """
+    if not ACCESS_PASSWORD:
+        return {"success": True, "message": "No password required"}
+    if password == ACCESS_PASSWORD:
+        return {"success": True, "message": "Authenticated"}
+    raise HTTPException(status_code=401, detail="Invalid password")
+
+
 @app.get("/api/rooms")
-async def get_rooms_api():
+async def get_rooms_api(_: bool = Depends(verify_auth_header)):
     """활성화된 모든 룸의 목록을 조회합니다 (API 엔드포인트).
 
     /rooms와 동일한 기능을 제공하며, Vite 프록시 설정과 호환됩니다.
@@ -217,7 +263,7 @@ async def get_rooms_api():
 
 
 @app.get("/api/turn-credentials")
-async def get_turn_credentials():
+async def get_turn_credentials(_: bool = Depends(verify_auth_header)):
     """TURN 서버 credentials를 Frontend에 안전하게 제공합니다.
 
     AWS coturn 서버의 고정 credentials를 클라이언트에 전달합니다.
@@ -284,7 +330,7 @@ async def get_turn_credentials():
 
 
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(None)):
     """WebRTC 시그널링을 위한 WebSocket 엔드포인트.
 
     클라이언트와의 WebSocket 연결을 통해 실시간 시그널링 메시지를 주고받습니다.
@@ -338,6 +384,11 @@ async def websocket_endpoint(websocket: WebSocket):
             ...     }
             ... }));
     """
+    # Verify token before accepting connection
+    if not verify_ws_token(token):
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
     await websocket.accept()
 
     peer_id = str(uuid.uuid4())
@@ -421,31 +472,36 @@ async def websocket_endpoint(websocket: WebSocket):
     peer_manager.on_ice_candidate_callback = on_ice_candidate
 
     # Register callback for STT transcript
-    async def on_transcript(peer_id: str, room_name: str, transcript: str):
+    async def on_transcript(peer_id: str, room_name: str, transcript: str, source: str = "google", is_final: bool = True):
         """STT 인식 결과를 WebSocket을 통해 전송하고 에이전트를 실행하는 콜백 함수.
 
         Args:
             peer_id (str): 음성을 전송한 피어의 ID
             room_name (str): 피어가 속한 룸 이름
             transcript (str): 인식된 텍스트
+            source (str): STT 엔진 소스 ("google" 또는 "elevenlabs")
+            is_final (bool): 최종 결과 여부 (False면 partial/interim)
 
         Note:
             - 같은 룸의 모든 피어에게 브로드캐스트
             - 메시지 형식: {"type": "transcript", "data": {...}}
-            - LangGraph 에이전트 실행하여 실시간 요약 생성
+            - Google STT 결과만 LangGraph 에이전트 실행 (중복 방지)
+            - ElevenLabs partial 결과도 UI 표시용으로 전송
         """
-        logger.info(f"💬 Transcript from {peer_id} in room '{room_name}': {transcript}")
+        result_type = "final" if is_final else "partial"
+        logger.info(f"💬 [{source.upper()}:{result_type}] Transcript from {peer_id} in room '{room_name}': {transcript}")
 
         # Get peer nickname
         peer_info = room_manager.get_peer(peer_id)
         nickname = peer_info.nickname if peer_info else "Unknown"
 
-        # Save transcript to room history
+        # Save transcript to room history (only for Google to avoid duplicates)
         import time
         current_time = time.time()
-        room_manager.add_transcript(peer_id, room_name, transcript, timestamp=current_time)
+        if source == "google":
+            room_manager.add_transcript(peer_id, room_name, transcript, timestamp=current_time)
 
-        # Broadcast transcript to all peers in room
+        # Broadcast transcript to all peers in room (include source for comparison)
         await broadcast_to_room(
             room_name,
             {
@@ -454,12 +510,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     "peer_id": peer_id,
                     "nickname": nickname,
                     "text": transcript,
-                    "timestamp": current_time
+                    "timestamp": current_time,
+                    "source": source,  # Google or ElevenLabs
+                    "is_final": is_final  # True for final, False for partial
                 }
             }
         )
 
         # 🤖 LangGraph 에이전트 실행 (실시간 요약 생성)
+        # Skip agent for STT comparison room
+        if room_name == "stt-comparison-room":
+            logger.debug(f"⏭️ Skipping agent for STT comparison room")
+            return
+
+        # Only run agent for Google STT to avoid duplicate summaries
+        if source != "google":
+            logger.debug(f"⏭️ Skipping agent for {source} source (only Google STT triggers agent)")
+            return
+
         try:
             agent = room_agents.get(room_name)
 
@@ -531,21 +599,26 @@ async def websocket_endpoint(websocket: WebSocket):
                 room_manager.join_room(room_name, peer_id, nickname, websocket)
                 current_room = room_name
 
-                # 🤖 방 생성/입장 시 에이전트 생성
-                logger.info(f"🤖 Creating/getting agent for room '{room_name}'")
-                agent = get_or_create_agent(room_name)
-                logger.info(f"✅ Agent ready for room '{room_name}'")
+                # 🤖 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
+                if room_name == "stt-comparison-room":
+                    logger.info(f"⏭️ Skipping agent creation for STT comparison room")
+                    agent = None
+                else:
+                    logger.info(f"🤖 Creating/getting agent for room '{room_name}'")
+                    agent = get_or_create_agent(room_name)
+                    logger.info(f"✅ Agent ready for room '{room_name}'")
 
-                # 에이전트 준비 완료 알림 전송
-                await broadcast_to_room(
-                    room_name,
-                    {
-                        "type": "agent_ready",
-                        "data": {
-                            "llm_available": agent.llm_available
+                # 에이전트 준비 완료 알림 전송 (STT 비교 룸은 제외)
+                if agent is not None:
+                    await broadcast_to_room(
+                        room_name,
+                        {
+                            "type": "agent_ready",
+                            "data": {
+                                "llm_available": agent.llm_available
+                            }
                         }
-                    }
-                )
+                    )
 
                 # Get other peers in room
                 other_peers = room_manager.get_other_peers(room_name, peer_id)
@@ -700,6 +773,34 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     logger.info(f"Peer {nickname} ({peer_id}) left room '{current_room}'")
                     current_room = None
+
+            elif message_type == "enable_dual_stt":
+                # Handle dual STT enable/disable request
+                if not current_room:
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"message": "Not in a room"}
+                    })
+                    continue
+
+                enabled = data.get("data", {}).get("enabled", True)
+
+                try:
+                    await peer_manager.enable_dual_stt(peer_id, current_room, enabled)
+                    await websocket.send_json({
+                        "type": "dual_stt_status",
+                        "data": {
+                            "enabled": enabled,
+                            "peer_id": peer_id
+                        }
+                    })
+                    logger.info(f"{'✅ Enabled' if enabled else '⏹️ Disabled'} dual STT for peer {peer_id}")
+                except Exception as e:
+                    logger.error(f"Error toggling dual STT: {e}")
+                    await websocket.send_json({
+                        "type": "error",
+                        "data": {"message": f"Failed to toggle dual STT: {str(e)}"}
+                    })
 
             elif message_type == "get_rooms":
                 # Send list of available rooms

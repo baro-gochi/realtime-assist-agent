@@ -110,8 +110,9 @@ export class WebRTCClient {
    *   document.getElementById('remoteVideo').srcObject = stream;
    * };
    */
-  constructor(signalingUrl = 'ws://localhost:8000/ws') {
+  constructor(signalingUrl = 'ws://localhost:8000/ws', authToken = null) {
     this.signalingUrl = signalingUrl;
+    this.authToken = authToken || sessionStorage.getItem('auth_token');
     this.ws = null;
     this.pc = null;
     this.peerId = null;
@@ -131,6 +132,8 @@ export class WebRTCClient {
     this.onConnectionStateChange = null;
     this.onError = null;
     this.onTranscript = null; // STT transcript 이벤트 콜백
+    this.onDualSttStatus = null; // Dual STT 상태 변경 콜백
+    this.onLocalStream = null; // 로컬 스트림 획득 콜백
 
     // Prefetch TURN credentials on construction
     this.prefetchTurnCredentials();
@@ -152,7 +155,12 @@ export class WebRTCClient {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 15000);
 
-      const response = await fetch(backendUrl, { signal: controller.signal });
+      const headers = {};
+      if (this.authToken) {
+        headers['Authorization'] = `Bearer ${this.authToken}`;
+      }
+
+      const response = await fetch(backendUrl, { signal: controller.signal, headers });
       clearTimeout(timeoutId);
 
       if (response.ok) {
@@ -201,10 +209,16 @@ export class WebRTCClient {
    */
   async connect() {
     return new Promise((resolve, reject) => {
-      console.log('🔌 Attempting to connect to:', this.signalingUrl);
+      // Append auth token to WebSocket URL if available
+      let wsUrl = this.signalingUrl;
+      if (this.authToken) {
+        const separator = wsUrl.includes('?') ? '&' : '?';
+        wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(this.authToken)}`;
+      }
+      console.log('🔌 Attempting to connect to:', wsUrl);
 
       try {
-        this.ws = new WebSocket(this.signalingUrl);
+        this.ws = new WebSocket(wsUrl);
       } catch (error) {
         console.error('🔌 Failed to create WebSocket:', error);
         reject(new Error(`Failed to create WebSocket: ${error.message}`));
@@ -228,6 +242,14 @@ export class WebRTCClient {
         console.log('🔌 Close code:', event.code);
         console.log('🔌 Close reason:', event.reason);
         console.log('🔌 Was clean:', event.wasClean);
+
+        // Handle authentication failure
+        if (event.code === 4001) {
+          console.error('🔌 Authentication failed - unauthorized');
+          sessionStorage.removeItem('auth_token');
+          if (this.onError) this.onError(new Error('Unauthorized - please re-login'));
+          window.location.reload();
+        }
       };
 
       this.ws.onmessage = async (event) => {
@@ -327,6 +349,13 @@ export class WebRTCClient {
         console.log('💬 Transcript received:', data);
         if (this.onTranscript) {
           this.onTranscript(data);
+        }
+        break;
+
+      case 'dual_stt_status':
+        console.log('🔄 Dual STT status:', data);
+        if (this.onDualSttStatus) {
+          this.onDualSttStatus(data);
         }
         break;
 
@@ -757,30 +786,45 @@ export class WebRTCClient {
   /**
    * 시그널링 서버에 메시지를 전송합니다
    *
-   * @param {string} type - 메시지 타입 (예: 'offer', 'ice_candidate', 'join_room')
-   * @param {Object} data - 메시지 데이터
+   * @param {string|Object} typeOrMessage - 메시지 타입 문자열 또는 {type, data} 형태의 메시지 객체
+   * @param {Object} [data] - 메시지 데이터 (첫 번째 인자가 문자열인 경우)
    *
    * @description
    * WebSocket을 통해 서버에 JSON 형식의 메시지를 보냅니다.
    * WebSocket이 열려있지 않으면 에러 로그만 출력하고 무시합니다.
    *
+   * 두 가지 호출 방식을 지원합니다:
+   * 1. sendMessage('type', { data }) - 기존 방식
+   * 2. sendMessage({ type: 'type', data: { data } }) - 객체 방식
+   *
    * @example
+   * // 기존 방식
    * this.sendMessage('join_room', {
    *   room_name: '상담실1',
    *   nickname: '홍길동'
    * });
    *
    * @example
-   * this.sendMessage('offer', {
-   *   sdp: offer.sdp,
-   *   type: offer.type
+   * // 객체 방식
+   * this.sendMessage({
+   *   type: 'enable_dual_stt',
+   *   data: { enabled: true }
    * });
    */
-  sendMessage(type, data) {
+  sendMessage(typeOrMessage, data) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type, data }));
+      let message;
+      if (typeof typeOrMessage === 'string') {
+        // 기존 방식: sendMessage('type', { data })
+        message = { type: typeOrMessage, data };
+      } else {
+        // 객체 방식: sendMessage({ type, data })
+        message = typeOrMessage;
+      }
+      this.ws.send(JSON.stringify(message));
+      console.log('📤 Sent message:', message.type);
     } else {
-      console.error('WebSocket is not open');
+      console.warn('⚠️ WebSocket not connected, cannot send message');
     }
   }
 
@@ -983,6 +1027,54 @@ export class WebRTCClient {
     }
 
     console.log('Disconnected');
+  }
+
+  /**
+   * 로컬 미디어 스트림을 시작합니다 (마이크/카메라).
+   *
+   * @async
+   * @param {Object} constraints - MediaStream 제약 조건
+   * @param {boolean} [constraints.audio=true] - 오디오 활성화 여부
+   * @param {boolean} [constraints.video=false] - 비디오 활성화 여부
+   * @returns {Promise<MediaStream>} 로컬 미디어 스트림
+   */
+  async startLocalStream(constraints = { audio: true, video: false }) {
+    try {
+      this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
+      console.log('🎤 Local stream started:', this.localStream.getTracks().map(t => t.kind));
+
+      // 로컬 스트림 콜백 호출
+      if (this.onLocalStream) {
+        this.onLocalStream(this.localStream);
+      }
+
+      // 이미 연결된 상태라면 트랙 추가 및 재협상
+      if (this.pc && this.ws && this.roomName) {
+        this.localStream.getTracks().forEach(track => {
+          this.pc.addTrack(track, this.localStream);
+        });
+        // Offer 재전송
+        await this.sendOffer();
+      }
+
+      return this.localStream;
+    } catch (error) {
+      console.error('❌ Failed to start local stream:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * 로컬 미디어 스트림을 중지합니다.
+   */
+  stopLocalStream() {
+    if (this.localStream) {
+      this.localStream.getTracks().forEach(track => {
+        track.stop();
+      });
+      this.localStream = null;
+      console.log('🛑 Local stream stopped');
+    }
   }
 
   /**
