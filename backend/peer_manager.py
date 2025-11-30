@@ -1,24 +1,23 @@
 """WebRTC 피어 연결 관리 모듈.
 
 이 모듈은 WebRTC 피어 연결을 관리하고 SFU(Selective Forwarding Unit) 패턴을
-구현하여 룸 기반 미디어 스트림 릴레이를 제공합니다.
+구현하여 룸 기반 오디오 스트림 릴레이를 제공합니다.
 
 주요 기능:
     - WebRTC 피어 연결 생성 및 관리
-    - 오디오/비디오 트랙 릴레이 (SFU 패턴)
-    - 룸 내 참가자 간 미디어 스트림 전달
+    - 오디오 트랙 릴레이 (SFU 패턴)
+    - 룸 내 참가자 간 오디오 스트림 전달
     - ICE 연결 상태 모니터링
     - 오디오 프레임 캡처 (STT 처리를 위한 준비)
 
 Architecture:
-    - SFU (Selective Forwarding Unit): 서버가 미디어를 중계하여 각 클라이언트의 부하 감소
+    - SFU (Selective Forwarding Unit): 서버가 오디오를 중계하여 각 클라이언트의 부하 감소
     - MediaRelay: aiortc의 미디어 릴레이를 사용한 효율적인 스트림 처리
-    - Track Management: 각 피어의 오디오/비디오 트랙을 독립적으로 관리
+    - Track Management: 각 피어의 오디오 트랙을 독립적으로 관리
 
 Classes:
     AudioRelayTrack: STT 처리를 위한 오디오 프레임 캡처 기능이 있는 트랙
-    VideoRelayTrack: 비디오 프레임을 릴레이하는 트랙
-    PeerConnectionManager: WebRTC 연결 및 미디어 릴레이 관리
+    PeerConnectionManager: WebRTC 연결 및 오디오 릴레이 관리
 
 WebRTC Flow:
     1. 클라이언트가 offer 전송
@@ -149,62 +148,24 @@ class AudioRelayTrack(MediaStreamTrack):
         return frame
 
 
-class VideoRelayTrack(MediaStreamTrack):
-    """비디오 프레임을 릴레이하는 트랙.
-
-    참가자로부터 받은 비디오 스트림을 다른 참가자들에게 전달합니다.
-    AudioRelayTrack과 달리 프레임 캡처 기능은 없습니다.
-
-    Attributes:
-        kind (str): 트랙 종류 ("video")
-        track (MediaStreamTrack): 원본 비디오 트랙
-
-    Examples:
-        >>> original_track = ... # 원본 비디오 트랙
-        >>> relay_track = VideoRelayTrack(original_track)
-        >>> frame = await relay_track.recv()  # 프레임 수신 및 릴레이
-    """
-    kind = "video"
-
-    def __init__(self, track: MediaStreamTrack):
-        """VideoRelayTrack 초기화.
-
-        Args:
-            track (MediaStreamTrack): 릴레이할 원본 비디오 트랙
-        """
-        super().__init__()
-        self.track = track
-
-    async def recv(self):
-        """비디오 프레임을 수신하고 릴레이합니다.
-
-        원본 트랙에서 프레임을 받아 그대로 전달합니다.
-
-        Returns:
-            VideoFrame: 수신한 비디오 프레임
-        """
-        return await self.track.recv()
-
-
 class PeerConnectionManager:
     """WebRTC 피어 연결을 룸 기반으로 관리하는 클래스.
 
-    SFU(Selective Forwarding Unit) 패턴을 구현하여 서버가 미디어를 중계합니다.
-    같은 룸의 피어들 간 미디어 스트림을 효율적으로 전달합니다.
+    SFU(Selective Forwarding Unit) 패턴을 구현하여 서버가 오디오를 중계합니다.
+    같은 룸의 피어들 간 오디오 스트림을 효율적으로 전달합니다.
 
     Attributes:
         peers (Dict[str, RTCPeerConnection]): 피어 ID → RTCPeerConnection 매핑
         peer_rooms (Dict[str, str]): 피어 ID → 룸 이름 매핑
         relay (MediaRelay): aiortc 미디어 릴레이 객체
         audio_tracks (Dict[str, AudioRelayTrack]): 피어 ID → 오디오 트랙 매핑
-        video_tracks (Dict[str, VideoRelayTrack]): 피어 ID → 비디오 트랙 매핑
 
     Architecture Pattern:
         SFU (Selective Forwarding Unit):
             - 각 클라이언트는 서버에만 연결 (1:1)
-            - 서버가 미디어를 선택적으로 다른 피어들에게 전달
+            - 서버가 오디오를 선택적으로 다른 피어들에게 전달
             - 클라이언트 부하 감소 (N-1개 연결 대신 1개)
-            - 서버에서 미디어 처리/분석 가능 (STT 등)
+            - 서버에서 오디오 처리/분석 가능 (STT 등)
 
     WebRTC Connection Lifecycle:
         1. create_peer_connection(): 새 피어 연결 생성
@@ -241,7 +202,6 @@ class PeerConnectionManager:
 
         # peer_id -> tracks (now storing original tracks for direct relay)
         self.audio_tracks: Dict[str, MediaStreamTrack] = {}
-        self.video_tracks: Dict[str, MediaStreamTrack] = {}
 
         # Callback for track received event (used to trigger renegotiation)
         self.on_track_received_callback = None
@@ -298,9 +258,8 @@ class PeerConnectionManager:
         Event Handlers:
             - iceconnectionstatechange: ICE 연결 상태 변경 모니터링
                 - "failed" 상태 시 자동으로 연결 종료
-            - track: 미디어 트랙 수신 시
+            - track: 오디오 트랙 수신 시
                 - 오디오: AudioRelayTrack 생성 및 룸 내 릴레이
-                - 비디오: VideoRelayTrack 생성 및 룸 내 릴레이
                 - track.on("ended"): 트랙 종료 이벤트 처리
 
         Note:
@@ -397,18 +356,17 @@ class PeerConnectionManager:
 
         @pc.on("track")
         async def on_track(track: MediaStreamTrack):
-            """미디어 트랙 수신 시 호출되는 이벤트 핸들러.
+            """오디오 트랙 수신 시 호출되는 이벤트 핸들러.
 
-            WebRTC 연결을 통해 새로운 미디어 트랙(오디오 또는 비디오)이
-            수신되면 자동으로 호출되며, 트랙을 저장하고 같은 룸의 다른
-            피어들에게 릴레이합니다.
+            WebRTC 연결을 통해 새로운 오디오 트랙이 수신되면 자동으로 호출되며,
+            트랙을 저장하고 같은 룸의 다른 피어들에게 릴레이합니다.
 
             Args:
-                track (MediaStreamTrack): 수신된 미디어 트랙
+                track (MediaStreamTrack): 수신된 오디오 트랙
 
             Workflow:
-                1. 트랙 종류 확인 (audio/video)
-                2. 원본 트랙 저장 (self.audio_tracks 또는 self.video_tracks)
+                1. 오디오 트랙인지 확인
+                2. 원본 트랙 저장 (self.audio_tracks)
                 3. 같은 룸의 다른 피어들에게 트랙 릴레이
                 4. 첫 번째 트랙인 경우 renegotiation 콜백 트리거
                 5. 트랙 종료 이벤트 핸들러 등록
@@ -452,13 +410,6 @@ class PeerConnectionManager:
                 # Add relay track to other peers in same room
                 await self._relay_to_room_peers(peer_id, room_name, relay_track)
 
-            elif track.kind == "video":
-                # Store original track (no decoding/re-encoding)
-                self.video_tracks[peer_id] = track
-
-                # Add track to other peers in same room
-                await self._relay_to_room_peers(peer_id, room_name, track)
-
             # Trigger renegotiation ONCE per peer (when first track arrives)
             if trigger_renegotiation and self.on_track_received_callback:
                 self.renegotiation_triggered[peer_id] = True
@@ -471,8 +422,8 @@ class PeerConnectionManager:
             async def on_ended():
                 """트랙 종료 시 호출되는 이벤트 핸들러.
 
-                미디어 트랙의 스트리밍이 종료되었을 때 호출됩니다.
-                참가자가 카메라/마이크를 끄거나 연결이 종료될 때 발생합니다.
+                오디오 트랙의 스트리밍이 종료되었을 때 호출됩니다.
+                참가자가 마이크를 끄거나 연결이 종료될 때 발생합니다.
 
                 Note:
                     - 현재는 로깅만 수행
@@ -532,7 +483,7 @@ class PeerConnectionManager:
         """WebRTC offer를 처리하고 answer를 생성합니다.
 
         클라이언트로부터 받은 WebRTC offer를 처리하여 피어 연결을 설정하고,
-        기존 참가자의 미디어 트랙을 추가한 후 answer를 반환합니다.
+        기존 참가자의 오디오 트랙을 추가한 후 answer를 반환합니다.
 
         Args:
             peer_id (str): offer를 보낸 피어의 ID
@@ -549,9 +500,7 @@ class PeerConnectionManager:
 
         Workflow:
             1. 피어 연결 생성 또는 재사용 (renegotiation case)
-            2. 같은 룸의 다른 피어들의 트랙을 새 피어에게 추가
-                - 기존 오디오 트랙 추가
-                - 기존 비디오 트랙 추가
+            2. 같은 룸의 다른 피어들의 오디오 트랙을 새 피어에게 추가
             3. Remote Description 설정 (offer)
             4. Answer 생성
             5. Local Description 설정 (answer)
@@ -608,16 +557,6 @@ class PeerConnectionManager:
                         else:
                             logger.info(f"⏭️ Skipped existing audio track from {other_peer_id}")
 
-                    # Add video track if exists and not already added
-                    if other_peer_id in self.video_tracks:
-                        track = self.video_tracks[other_peer_id]
-                        if track.id not in current_track_ids:
-                            pc.addTrack(track)
-                            logger.info(f"🔄 Added NEW video track from {other_peer_id} to {peer_id}")
-                            tracks_added += 1
-                        else:
-                            logger.info(f"⏭️ Skipped existing video track from {other_peer_id}")
-
             logger.info(f"Total new tracks added: {tracks_added}")
 
             # Wait for TURN BEFORE creating answer
@@ -642,18 +581,13 @@ class PeerConnectionManager:
         logger.info(f"🆕 Creating new peer connection for {peer_id}")
         pc = await self.create_peer_connection(peer_id, room_name, other_peers_in_room)
 
-        # Add tracks from other peers in the room
+        # Add audio tracks from other peers in the room
         for other_peer_id in other_peers_in_room:
             if other_peer_id != peer_id:
                 # Add audio track if exists
                 if other_peer_id in self.audio_tracks:
                     pc.addTrack(self.audio_tracks[other_peer_id])
                     logger.info(f"Added audio track from {other_peer_id} to {peer_id}")
-
-                # Add video track if exists
-                if other_peer_id in self.video_tracks:
-                    pc.addTrack(self.video_tracks[other_peer_id])
-                    logger.info(f"Added video track from {other_peer_id} to {peer_id}")
 
         # Set remote description (offer)
         await pc.setRemoteDescription(
@@ -683,7 +617,7 @@ class PeerConnectionManager:
         """피어 연결을 종료하고 관련 리소스를 정리합니다.
 
         RTCPeerConnection을 닫고 모든 관련 데이터를 딕셔너리에서 제거합니다.
-        미디어 트랙도 함께 정리됩니다.
+        오디오 트랙도 함께 정리됩니다.
 
         Args:
             peer_id (str): 종료할 피어의 ID
@@ -693,8 +627,7 @@ class PeerConnectionManager:
             2. peers 딕셔너리에서 제거
             3. peer_rooms 딕셔너리에서 제거
             4. audio_tracks 딕셔너리에서 제거
-            5. video_tracks 딕셔너리에서 제거
-            6. renegotiation_triggered 플래그 제거
+            5. renegotiation_triggered 플래그 제거
 
         Note:
             - 존재하지 않는 피어 ID로 호출해도 안전함
@@ -717,9 +650,6 @@ class PeerConnectionManager:
 
         if peer_id in self.audio_tracks:
             del self.audio_tracks[peer_id]
-
-        if peer_id in self.video_tracks:
-            del self.video_tracks[peer_id]
 
         if peer_id in self.renegotiation_triggered:
             del self.renegotiation_triggered[peer_id]

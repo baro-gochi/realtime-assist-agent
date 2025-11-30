@@ -1,26 +1,26 @@
 /**
- * @fileoverview WebRTC 클라이언트 - 룸 기반 화상 통화 시스템
+ * @fileoverview WebRTC 클라이언트 - 룸 기반 음성 통화 시스템
  *
  * @description
- * 이 파일은 WebRTC를 사용한 실시간 화상/음성 통화 기능을 제공합니다.
- * 서버의 시그널링 서버와 통신하여 피어 간 연결을 설정하고 미디어를 주고받습니다.
+ * 이 파일은 WebRTC를 사용한 실시간 음성 통화 기능을 제공합니다.
+ * 서버의 시그널링 서버와 통신하여 피어 간 연결을 설정하고 오디오를 주고받습니다.
  *
  * 주요 개념 (초보자 필독):
- * - WebRTC: 웹 브라우저 간 실시간 통신 기술 (카메라, 마이크, 화면 공유 등)
+ * - WebRTC: 웹 브라우저 간 실시간 통신 기술 (마이크, 오디오 스트림)
  * - WebSocket: 서버와 실시간 양방향 통신을 위한 기술
  * - 시그널링: WebRTC 연결을 설정하기 위한 초기 정보 교환 과정
  * - SDP (Session Description Protocol): 연결 정보를 담은 데이터 형식
  * - ICE Candidate: 네트워크 경로 정보
- * - MediaStream: 카메라/마이크에서 오는 오디오/비디오 데이터 흐름
+ * - MediaStream: 마이크에서 오는 오디오 데이터 흐름
  *
  * 연결 과정 (순서대로):
  * 1. WebSocket으로 시그널링 서버에 연결
  * 2. 룸(방)에 참가
- * 3. 카메라/마이크 권한 요청 및 로컬 미디어 획득
+ * 3. 마이크 권한 요청 및 로컬 오디오 획득
  * 4. RTCPeerConnection 생성 및 offer 전송
  * 5. 서버로부터 answer 수신
  * 6. ICE candidate 교환
- * 7. 미디어 스트림 송수신 시작
+ * 7. 오디오 스트림 송수신 시작
  *
  * @see {@link https://developer.mozilla.org/ko/docs/Web/API/WebRTC_API} WebRTC API 문서
  * @see {@link https://developer.mozilla.org/ko/docs/Web/API/WebSocket} WebSocket API 문서
@@ -31,7 +31,7 @@
  *
  * // 이벤트 핸들러 등록
  * client.onRemoteStream = (stream) => {
- *   videoElement.srcObject = stream;
+ *   audioElement.srcObject = stream;
  * };
  *
  * // 연결 및 통화 시작
@@ -45,8 +45,8 @@
  *
  * @class WebRTCClient
  * @description
- * 룸 기반 화상 통화를 위한 WebRTC 클라이언트입니다.
- * 시그널링 서버와 통신하여 다른 참가자들과 실시간으로 오디오/비디오를 주고받습니다.
+ * 룸 기반 음성 통화를 위한 WebRTC 클라이언트입니다.
+ * 시그널링 서버와 통신하여 다른 참가자들과 실시간으로 오디오를 주고받습니다.
  *
  * @tutorial
  * WebRTC 연결 과정 이해하기:
@@ -61,9 +61,9 @@
  *    - STUN 서버가 공인 IP를 찾아줌
  *    - 가능한 모든 연결 경로를 시도
  *
- * 3단계: 미디어 전송
- *    - P2P 연결이 완료되면 직접 미디어 전송
- *    - 서버는 더 이상 미디어 데이터를 중계하지 않음
+ * 3단계: 오디오 전송
+ *    - P2P 연결이 완료되면 직접 오디오 전송
+ *    - 서버는 더 이상 오디오 데이터를 중계하지 않음
  *    - 낮은 지연시간으로 실시간 통화 가능
  */
 export class WebRTCClient {
@@ -79,12 +79,12 @@ export class WebRTCClient {
    *
    * @property {string} signalingUrl - 시그널링 서버 주소
    * @property {WebSocket|null} ws - WebSocket 연결 객체 (서버와 통신)
-   * @property {RTCPeerConnection|null} pc - WebRTC 피어 연결 객체 (미디어 송수신)
+   * @property {RTCPeerConnection|null} pc - WebRTC 피어 연결 객체 (오디오 송수신)
    * @property {string|null} peerId - 서버가 할당한 고유 ID
    * @property {string|null} roomName - 현재 참가 중인 룸 이름
    * @property {string|null} nickname - 사용자 닉네임
-   * @property {MediaStream|null} localStream - 내 카메라/마이크 스트림
-   * @property {MediaStream} remoteStream - 상대방 카메라/마이크 스트림
+   * @property {MediaStream|null} localStream - 내 마이크 스트림
+   * @property {MediaStream} remoteStream - 상대방 마이크 스트림
    *
    * @property {Function|null} onPeerId - 피어 ID를 받았을 때 호출되는 콜백
    * @property {Function|null} onRoomJoined - 룸 참가 성공 시 호출되는 콜백
@@ -107,7 +107,7 @@ export class WebRTCClient {
    * const client = new WebRTCClient();
    * client.onPeerId = (id) => console.log('내 ID:', id);
    * client.onRemoteStream = (stream) => {
-   *   document.getElementById('remoteVideo').srcObject = stream;
+   *   document.getElementById('remoteAudio').srcObject = stream;
    * };
    */
   constructor(signalingUrl = 'ws://localhost:8000/ws', authToken = null) {
@@ -431,19 +431,17 @@ export class WebRTCClient {
   }
 
   /**
-   * 로컬 미디어 스트림을 획득합니다 (카메라 + 마이크)
+   * 로컬 오디오 스트림을 획득합니다 (마이크)
    *
    * @async
-   * @returns {Promise<MediaStream>} 로컬 미디어 스트림
-   * @throws {Error} 미디어 접근 권한이 없거나 기기가 없으면 에러 발생
+   * @returns {Promise<MediaStream>} 로컬 오디오 스트림
+   * @throws {Error} 마이크 접근 권한이 없거나 기기가 없으면 에러 발생
    *
    * @description
-   * 사용자의 카메라와 마이크에 접근하여 미디어 스트림을 가져옵니다.
+   * 사용자의 마이크에 접근하여 오디오 스트림을 가져옵니다.
    * 처음 실행 시 브라우저가 권한을 요청합니다.
    *
-   * 미디어 설정:
-   * - 비디오: 1280x720 해상도 (HD)
-   * - 오디오:
+   * 오디오 설정:
    *   - echoCancellation: 에코 제거 (내 소리가 다시 들리는 현상 방지)
    *   - noiseSuppression: 배경 소음 제거
    *   - autoGainControl: 음량 자동 조절
@@ -452,10 +450,10 @@ export class WebRTCClient {
    * const client = new WebRTCClient();
    * try {
    *   const stream = await client.getLocalMedia();
-   *   videoElement.srcObject = stream; // 비디오 요소에 연결
+   *   audioElement.srcObject = stream; // 오디오 요소에 연결
    * } catch (error) {
    *   if (error.name === 'NotAllowedError') {
-   *     alert('카메라/마이크 권한이 필요합니다');
+   *     alert('마이크 권한이 필요합니다');
    *   }
    * }
    *
@@ -463,27 +461,23 @@ export class WebRTCClient {
    * 주의사항:
    * - HTTPS 또는 localhost에서만 작동 (보안상의 이유)
    * - 사용자가 권한을 거부하면 에러 발생
-   * - 카메라/마이크가 다른 앱에서 사용 중이면 실패할 수 있음
+   * - 마이크가 다른 앱에서 사용 중이면 실패할 수 있음
    */
   async getLocalMedia() {
     try {
-      console.log('🎥 Requesting camera/microphone permissions...');
+      console.log('🎤 Requesting microphone permissions...');
       console.log('🔒 Current protocol:', window.location.protocol);
       console.log('🔒 Is secure context:', window.isSecureContext);
 
       this.localStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
+        video: false,
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true
         }
       });
-      console.log('✅ Local media stream obtained');
-      console.log('📹 Video tracks:', this.localStream.getVideoTracks().length);
+      console.log('✅ Local audio stream obtained');
       console.log('🎤 Audio tracks:', this.localStream.getAudioTracks().length);
       return this.localStream;
     } catch (error) {
@@ -492,15 +486,15 @@ export class WebRTCClient {
       console.error('❌ Error message:', error.message);
 
       // Show user-friendly error
-      let userMessage = 'Failed to access camera/microphone: ';
+      let userMessage = 'Failed to access microphone: ';
       if (error.name === 'NotAllowedError') {
-        userMessage += 'Permission denied. Please allow camera and microphone access.';
+        userMessage += 'Permission denied. Please allow microphone access.';
       } else if (error.name === 'NotFoundError') {
-        userMessage += 'No camera or microphone found on this device.';
+        userMessage += 'No microphone found on this device.';
       } else if (error.name === 'NotReadableError') {
-        userMessage += 'Camera/microphone is already in use by another application.';
+        userMessage += 'Microphone is already in use by another application.';
       } else if (error.name === 'NotSecureError' || !window.isSecureContext) {
-        userMessage += 'Camera/microphone requires HTTPS. Please use https:// URL.';
+        userMessage += 'Microphone requires HTTPS. Please use https:// URL.';
       } else {
         userMessage += error.message;
       }
@@ -518,19 +512,19 @@ export class WebRTCClient {
    *
    * @description
    * WebRTC의 핵심인 RTCPeerConnection 객체를 생성합니다.
-   * 이 연결을 통해 실제 미디어(오디오/비디오)가 전송됩니다.
+   * 이 연결을 통해 실제 오디오가 전송됩니다.
    *
    * 주요 작업:
    * 1. RTCPeerConnection 생성 (STUN 서버 설정)
-   * 2. 로컬 미디어 트랙 추가
+   * 2. 로컬 오디오 트랙 추가
    * 3. 이벤트 핸들러 등록:
-   *    - ontrack: 상대방 미디어 수신
+   *    - ontrack: 상대방 오디오 수신
    *    - onicecandidate: 네트워크 경로 정보 생성
    *    - onconnectionstatechange: 연결 상태 변경
    * 4. SDP Offer 생성 및 전송
    *
    * @example
-   * await client.getLocalMedia(); // 먼저 로컬 미디어 획득
+   * await client.getLocalMedia(); // 먼저 로컬 오디오 획득
    * await client.createPeerConnection(); // 그 다음 피어 연결 생성
    *
    * @tutorial
@@ -540,8 +534,8 @@ export class WebRTCClient {
    * - NAT 뒤에 있는 컴퓨터들이 통신할 수 있게 도와줌
    *
    * SDP Offer란?
-   * - "이런 미디어를 보낼 수 있어요"라는 제안
-   * - 지원하는 코덱, 해상도 등의 정보 포함
+   * - "이런 오디오를 보낼 수 있어요"라는 제안
+   * - 지원하는 코덱 등의 정보 포함
    * - 상대방이 answer로 응답함
    */
   async createPeerConnection() {
@@ -596,15 +590,14 @@ export class WebRTCClient {
       console.log('🎥 Track added to remoteStream:', track.kind, track.id);
 
       const currentTracks = this.remoteStream.getTracks();
-      console.log('🎥 Remote stream now has tracks:',
+      console.log('🎤 Remote stream now has tracks:',
         currentTracks.map(t => `${t.kind}:${t.id}:${t.readyState}`));
 
-      // onRemoteStream 콜백은 오디오+비디오 둘 다 있을 때만 호출
+      // onRemoteStream 콜백은 오디오 트랙이 있을 때 호출
       const hasAudio = currentTracks.some(t => t.kind === 'audio');
-      const hasVideo = currentTracks.some(t => t.kind === 'video');
 
-      if (hasAudio && hasVideo && this.onRemoteStream) {
-        console.log('🎥 Both audio and video tracks received, calling onRemoteStream callback');
+      if (hasAudio && this.onRemoteStream) {
+        console.log('🎤 Audio track received, calling onRemoteStream callback');
         this.onRemoteStream(this.remoteStream);
       }
     };
@@ -876,17 +869,17 @@ export class WebRTCClient {
   }
 
   /**
-   * 통화를 시작합니다 (미디어 획득 + 피어 연결 생성)
+   * 통화를 시작합니다 (오디오 획득 + 피어 연결 생성)
    *
    * @async
-   * @throws {Error} 미디어 획득 또는 연결 생성 실패 시 에러 발생
+   * @throws {Error} 오디오 획득 또는 연결 생성 실패 시 에러 발생
    *
    * @description
-   * 화상 통화를 시작하기 위한 모든 과정을 순서대로 실행합니다.
+   * 음성 통화를 시작하기 위한 모든 과정을 순서대로 실행합니다.
    * 이 메서드 하나로 통화 준비를 완료할 수 있습니다.
    *
    * 실행 순서:
-   * 1. getLocalMedia(): 카메라/마이크 권한 요청 및 스트림 획득
+   * 1. getLocalMedia(): 마이크 권한 요청 및 오디오 스트림 획득
    * 2. createPeerConnection(): WebRTC 연결 생성 및 offer 전송
    *
    * @example
@@ -901,7 +894,7 @@ export class WebRTCClient {
    * 통화 시작 전 체크리스트:
    * 1. ✅ WebSocket 연결 완료 (connect)
    * 2. ✅ 룸 참가 완료 (joinRoom)
-   * 3. ✅ 카메라/마이크 권한 승인
+   * 3. ✅ 마이크 권한 승인
    * 4. ✅ 네트워크 연결 상태 양호
    */
   async startCall() {
@@ -946,23 +939,23 @@ export class WebRTCClient {
    * 통화를 중단하고 모든 리소스를 정리합니다
    *
    * @description
-   * 미디어 스트림과 WebRTC 연결을 모두 종료합니다.
+   * 오디오 스트림과 WebRTC 연결을 모두 종료합니다.
    * 메모리 누수를 방지하기 위해 모든 리소스를 해제합니다.
    *
    * 정리 항목:
-   * 1. 로컬 미디어 트랙 정지 (카메라/마이크 LED 꺼짐)
+   * 1. 로컬 오디오 트랙 정지 (마이크 LED 꺼짐)
    * 2. 로컬 스트림 객체 제거
    * 3. RTCPeerConnection 종료
    * 4. 원격 스트림 정리
    *
    * @example
    * client.stopCall();
-   * // 카메라가 꺼지고 통화가 완전히 종료됨
+   * // 마이크가 꺼지고 통화가 완전히 종료됨
    *
    * @tutorial
    * track.stop()이 중요한 이유:
-   * - 카메라/마이크의 활성 LED가 꺼짐
-   * - 다른 앱에서 카메라를 사용할 수 있게 됨
+   * - 마이크의 활성 LED가 꺼짐
+   * - 다른 앱에서 마이크를 사용할 수 있게 됨
    * - 시스템 리소스 절약
    * - 배터리 수명 향상
    */
@@ -1030,15 +1023,14 @@ export class WebRTCClient {
   }
 
   /**
-   * 로컬 미디어 스트림을 시작합니다 (마이크/카메라).
+   * 로컬 오디오 스트림을 시작합니다 (마이크).
    *
    * @async
    * @param {Object} constraints - MediaStream 제약 조건
    * @param {boolean} [constraints.audio=true] - 오디오 활성화 여부
-   * @param {boolean} [constraints.video=false] - 비디오 활성화 여부
-   * @returns {Promise<MediaStream>} 로컬 미디어 스트림
+   * @returns {Promise<MediaStream>} 로컬 오디오 스트림
    */
-  async startLocalStream(constraints = { audio: true, video: false }) {
+  async startLocalStream(constraints = { audio: true }) {
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
       console.log('🎤 Local stream started:', this.localStream.getTracks().map(t => t.kind));
@@ -1065,7 +1057,7 @@ export class WebRTCClient {
   }
 
   /**
-   * 로컬 미디어 스트림을 중지합니다.
+   * 로컬 오디오 스트림을 중지합니다.
    */
   stopLocalStream() {
     if (this.localStream) {
@@ -1098,26 +1090,6 @@ export class WebRTCClient {
   }
 
   /**
-   * 비디오 트랙을 토글합니다 (카메라 켜기/끄기)
-   *
-   * @returns {boolean} 비디오 활성화 상태 (true: 켜짐, false: 꺼짐)
-   */
-  toggleVideo() {
-    if (this.localStream) {
-      const videoTracks = this.localStream.getVideoTracks();
-      if (videoTracks.length > 0) {
-        const enabled = !videoTracks[0].enabled;
-        videoTracks.forEach(track => {
-          track.enabled = enabled;
-        });
-        console.log(`📹 Video ${enabled ? 'enabled' : 'disabled'}`);
-        return enabled;
-      }
-    }
-    return false;
-  }
-
-  /**
    * 현재 오디오 활성화 상태를 반환합니다
    *
    * @returns {boolean} true: 오디오 켜짐, false: 오디오 꺼짐
@@ -1126,19 +1098,6 @@ export class WebRTCClient {
     if (this.localStream) {
       const audioTracks = this.localStream.getAudioTracks();
       return audioTracks.length > 0 && audioTracks[0].enabled;
-    }
-    return false;
-  }
-
-  /**
-   * 현재 비디오 활성화 상태를 반환합니다
-   *
-   * @returns {boolean} true: 비디오 켜짐, false: 비디오 꺼짐
-   */
-  isVideoEnabled() {
-    if (this.localStream) {
-      const videoTracks = this.localStream.getVideoTracks();
-      return videoTracks.length > 0 && videoTracks[0].enabled;
     }
     return false;
   }
