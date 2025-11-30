@@ -36,7 +36,7 @@ function STTComparison() {
 
   // Refs
   const clientRef = useRef(null);
-  const localVideoRef = useRef(null);
+  const localAudioRef = useRef(null);
   const googleResultsRef = useRef(null);
   const elevenlabsResultsRef = useRef(null);
 
@@ -65,10 +65,10 @@ function STTComparison() {
       setIsConnected(state === 'connected');
     };
 
-    // 로컬 스트림 핸들러
+    // 로컬 오디오 스트림 핸들러
     client.onLocalStream = (stream) => {
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
+      if (localAudioRef.current) {
+        localAudioRef.current.srcObject = stream;
       }
     };
 
@@ -283,11 +283,10 @@ function STTComparison() {
 
         {/* Audio Preview */}
         <div className="audio-preview">
-          <video
-            ref={localVideoRef}
+          <audio
+            ref={localAudioRef}
             autoPlay
             muted
-            playsInline
             style={{ display: 'none' }}
           />
           {isRecording && (

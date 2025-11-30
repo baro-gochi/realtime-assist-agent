@@ -773,11 +773,6 @@
   margin-top: 10px;
 }
 
-/* Hidden Videos (for WebRTC) */
-.hidden-videos {
-  display: none;
-}
-
 /* Error Message */
 .error-message {
   background-color: #FEE2E2;

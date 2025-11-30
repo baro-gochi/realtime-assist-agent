@@ -1,16 +1,18 @@
 /**
- * @fileoverview AI 상담 어시스턴트 메인 대시보드
+ * @fileoverview AI 상담 어시스턴트 메인 대시보드 (음성 전용)
  *
  * @description
  * 상담사를 위한 AI 어시스턴트 대시보드 컴포넌트입니다.
  * 실시간 STT, 연결 정보, 대화 내역, AI 추천 답변 등을 표시합니다.
+ * 비디오 없이 음성 통화만 지원합니다.
  *
  * 주요 기능:
  * 1. 상담사/고객 역할 선택
  * 2. 상담사: 방 생성, 고객: 방 목록에서 선택
- * 3. 실시간 음성 인식 및 대화 표시
+ * 3. 실시간 음성 인식 및 대화 표시 (오디오 전용)
  * 4. 연결된 상대방 정보 표시
- * 5. AI 추천 답변 (RAG 기반)
+ * 5. AI 실시간 요약 (JSON 형식)
+ * 6. AI 추천 답변 (RAG 기반) - 구현 예정
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -52,18 +54,15 @@ function AssistantMain() {
   const [summaryTimestamp, setSummaryTimestamp] = useState(null); // 요약 수신 시간
   const [llmStatus, setLlmStatus] = useState('connecting'); // 'connecting' | 'ready' | 'connected' | 'failed'
 
-  // 비디오 refs
-  const localVideoRef = useRef(null);
-  const remoteVideoRef = useRef(null);
+  // WebRTC ref
   const webrtcClientRef = useRef(null);
 
   // 폼 입력값
   const [roomInput, setRoomInput] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
 
-  // 오디오/비디오 상태
+  // 오디오 상태
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
-  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
 
   /**
    * WebRTC 클라이언트 초기화
@@ -105,14 +104,6 @@ function AssistantMain() {
       setParticipants(prev =>
         prev.filter(p => p.peer_id !== data.peer_id)
       );
-    };
-
-    client.onRemoteStream = (stream) => {
-      console.log('📺 Remote stream received');
-      if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== stream) {
-        remoteVideoRef.current.srcObject = stream;
-        remoteVideoRef.current.play().catch(err => console.error('Remote video play failed:', err));
-      }
     };
 
     client.onConnectionStateChange = (state) => {
@@ -352,11 +343,6 @@ function AssistantMain() {
     try {
       setError('');
       await webrtcClientRef.current.startCall();
-
-      if (localVideoRef.current && webrtcClientRef.current.localStream) {
-        localVideoRef.current.srcObject = webrtcClientRef.current.localStream;
-      }
-
       setCallStartTime(Date.now()); // 통화 시작 시간 기록
       setIsCallActive(true);
     } catch (err) {
@@ -371,10 +357,6 @@ function AssistantMain() {
    */
   const handleLeaveRoom = () => {
     webrtcClientRef.current.leaveRoom();
-
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-
     setIsInRoom(false);
     setIsCallActive(false);
     setCurrentRoom('');
@@ -393,16 +375,11 @@ function AssistantMain() {
   };
 
   /**
-   * 오디오/비디오 토글
+   * 오디오 토글
    */
   const handleToggleAudio = () => {
     const enabled = webrtcClientRef.current.toggleAudio();
     setIsAudioEnabled(enabled);
-  };
-
-  const handleToggleVideo = () => {
-    const enabled = webrtcClientRef.current.toggleVideo();
-    setIsVideoEnabled(enabled);
   };
 
   /**
@@ -637,13 +614,6 @@ function AssistantMain() {
                     >
                       {isAudioEnabled ? '🎤' : '🔇'}
                     </button>
-                    <button
-                      onClick={handleToggleVideo}
-                      className={`btn btn-sm ${isVideoEnabled ? 'btn-primary' : 'btn-secondary'}`}
-                      title={isVideoEnabled ? '비디오 끄기' : '비디오 켜기'}
-                    >
-                      {isVideoEnabled ? '📹' : '📷'}
-                    </button>
                   </div>
                   <button onClick={handleLeaveRoom} className="btn btn-danger btn-block mt-2">
                     통화 종료
@@ -776,12 +746,6 @@ function AssistantMain() {
           </aside>
         )}
       </main>
-
-      {/* Hidden Video Elements */}
-      <div className="hidden-videos">
-        <video ref={localVideoRef} autoPlay playsInline muted />
-        <video ref={remoteVideoRef} autoPlay playsInline />
-      </div>
     </div>
   );
 }
