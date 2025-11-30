@@ -140,7 +140,7 @@ origins = [
 # CORS - 개발 환경에서는 모든 로컬 네트워크 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$",
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$|^https://baro-gochi\.github\.io$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
