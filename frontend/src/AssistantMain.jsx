@@ -155,22 +155,20 @@ function AssistantMain() {
 
       // 정상 요약 수신 (JSON 파싱)
       if (data.node === 'summarize' && data.data.current_summary) {
-        setLlmStatus('connected');
-        setSummaryTimestamp(Date.now()); // 요약 수신 시간 기록
-
         // JSON 문자열 파싱 시도
         try {
           const summaryJson = JSON.parse(data.data.current_summary);
+
+          // 파싱 성공 시에만 UI 업데이트
+          setLlmStatus('connected');
+          setSummaryTimestamp(Date.now()); // 요약 수신 시간 기록
           setParsedSummary(summaryJson);
           console.log('📝 Summary parsed:', summaryJson);
         } catch (parseError) {
-          // JSON 파싱 실패 시 원본 문자열을 summary 필드에 저장
-          console.warn('⚠️ Failed to parse summary JSON, using raw string:', parseError);
-          setParsedSummary({
-            summary: data.data.current_summary,
-            customer_issue: '',
-            agent_action: ''
-          });
+          // JSON 파싱 실패 시 UI 업데이트 스킵 (이전 값 유지)
+          // 이렇게 하면 불완전한 JSON이 화면에 표시되지 않음
+          console.warn('⚠️ Failed to parse summary JSON, keeping previous value:', parseError.message);
+          console.debug('Raw content:', data.data.current_summary);
         }
       }
     };

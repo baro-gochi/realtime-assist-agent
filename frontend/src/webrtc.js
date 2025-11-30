@@ -472,9 +472,16 @@ export class WebRTCClient {
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+          // 오디오 품질 설정
+          sampleRate: 48000,           // 48kHz - 고품질 오디오
+          sampleSize: 16,              // 16비트
+          channelCount: 1,             // 모노 (대화용)
+          // 음성 처리 설정 - 네트워크 환경에 따라 조정
+          echoCancellation: true,      // 에코 제거
+          noiseSuppression: false,     // 노이즈 억제 끔 (로봇 소리 방지)
+          autoGainControl: true,       // 자동 게인 조절
+          // 지연 최소화
+          latency: 0                   // 최소 지연
         }
       });
       console.log('✅ Local audio stream obtained');
