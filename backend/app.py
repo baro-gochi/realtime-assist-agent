@@ -538,39 +538,33 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             logger.info(f"🤖 Running agent for room '{room_name}'")
             logger.info(f"📞 Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
 
-            # 스트리밍 모드로 에이전트 실행
-            chunk_count = 0
-            async for chunk in agent.on_new_transcript(peer_id, nickname, transcript, current_time):
-                chunk_count += 1
-                logger.info(f"🔔 Received chunk #{chunk_count} from agent")
+            # 비스트리밍 모드로 에이전트 실행 (JSON 응답)
+            result = await agent.on_new_transcript(peer_id, nickname, transcript, current_time)
 
-                # 각 노드의 업데이트를 즉시 브로드캐스트
-                node_name = list(chunk.keys())[0] if chunk else None
-                node_data = list(chunk.values())[0] if chunk else {}
+            # 에러 체크
+            if "error" in result:
+                logger.error(f"❌ Agent returned error: {result['error']}")
+                return
 
-                logger.info(f"📦 Chunk details - node_name: {node_name}, node_data keys: {list(node_data.keys()) if node_data else 'None'}")
+            # 결과 브로드캐스트 (JSON 형식의 요약)
+            current_summary = result.get("current_summary", "")
+            last_summarized_index = result.get("last_summarized_index", 0)
 
-                if node_name:
-                    # Filter out non-serializable fields (LangChain Message objects)
-                    # Keep only JSON-serializable fields like current_summary
-                    serializable_data = {
-                        k: v for k, v in node_data.items()
-                        if k != 'messages'  # Exclude messages field with HumanMessage objects
+            logger.info(f"📤 Broadcasting agent update with JSON summary")
+            logger.info(f"📊 Summary: {current_summary[:100]}...")
+
+            await broadcast_to_room(
+                room_name,
+                {
+                    "type": "agent_update",
+                    "node": "summarize",
+                    "data": {
+                        "current_summary": current_summary,
+                        "last_summarized_index": last_summarized_index
                     }
-
-                    logger.info(f"📤 Broadcasting agent update: {node_name}")
-                    logger.info(f"📡 Serializable data keys: {list(serializable_data.keys())}")
-                    await broadcast_to_room(
-                        room_name,
-                        {
-                            "type": "agent_update",
-                            "node": node_name,
-                            "data": serializable_data  # Only send JSON-serializable fields
-                        }
-                    )
-                    logger.info(f"✅ Broadcast completed")
-
-            logger.info(f"🏁 Agent streaming finished. Total chunks: {chunk_count}")
+                }
+            )
+            logger.info(f"✅ Broadcast completed")
 
         except Exception as e:
             logger.error(f"❌ Agent execution failed: {e}", exc_info=True)

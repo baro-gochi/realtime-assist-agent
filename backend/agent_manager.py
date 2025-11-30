@@ -4,24 +4,26 @@
 
 주요 기능:
     - 각 방마다 독립적인 에이전트 인스턴스 유지
-    - 새로운 transcript 수신 시 에이전트 실행
-    - 스트리밍 모드로 실시간 업데이트 반환
+    - 새로운 transcript 수신 시 에이전트 실행 (비스트리밍)
+    - 증분 요약: last_summarized_index로 요약된 위치 추적
+    - JSON 형식으로 구조화된 요약 반환
     - LLM 인스턴스를 한 번만 초기화하여 모든 에이전트가 공유
 
 Architecture:
     - room_agents: {room_name: RoomAgent}
     - RoomAgent: 방 하나당 1개 인스턴스, State 유지
     - llm: 모든 에이전트가 공유하는 LLM 인스턴스 (성능 최적화)
+    - 증분 요약: 기존 요약 + 새로운 transcript만 처리
 
 Example:
     >>> agent = get_or_create_agent("상담실1")
-    >>> async for chunk in agent.on_new_transcript("고객", "김철수", "환불하고 싶어요"):
-    ...     print(chunk)  # {"summarize": {"current_summary": "..."}}
+    >>> result = await agent.on_new_transcript("고객", "김철수", "환불하고 싶어요")
+    >>> print(result)  # {"current_summary": '{"summary": "...", ...}', "last_summarized_index": 1}
 """
 import os
 import logging
 import time
-from typing import Dict, AsyncIterator, Any
+from typing import Dict, Any
 from agent import create_agent_graph, ConversationState
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
@@ -69,10 +71,16 @@ class RoomAgent:
                 streaming=True
             )
 
-            # 시스템 메시지 (Runtime Context로 전달할 내용)
-            self.system_message = """고객 상담 대화를 1문장으로 개조식으로 매우 간단하게 요약하세요.
-예시: 고객이 환불을 요청함.
-고객의 주요 문의사항과 상담사의 대응을 포함하세요."""
+            # 시스템 메시지 (Runtime Context로 전달할 내용) - JSON 출력 강제
+            self.system_message = """
+            # 역할
+            고객 상담 대화를 요약하여 반드시 아래 JSON 형식으로만 출력하세요.
+            다른 텍스트 없이 JSON만 출력하세요.
+            
+            {{"summary": "한 문장 요약", "customer_issue": "고객 문의사항", "agent_action": "상담사 대응"}}
+            # 예시:
+            {{"summary": "고객이 환불을 요청함", "customer_issue": "제품 불량으로 환불 요청", "agent_action": "환불 절차 안내"}}
+            """
 
             logger.info("✅ LLM initialized successfully")
         except Exception as e:
@@ -93,6 +101,7 @@ class RoomAgent:
             "room_name": room_name,
             "conversation_history": [],
             "current_summary": "",
+            "last_summarized_index": 0,  # 증분 요약용 인덱스 추적
             "messages": []  # MessagesState 필수 필드
         }
 
@@ -104,8 +113,8 @@ class RoomAgent:
         speaker_name: str,
         text: str,
         timestamp: float = None
-    ) -> AsyncIterator[Dict[str, Any]]:
-        """새로운 transcript를 받아 에이전트를 실행합니다.
+    ) -> Dict[str, Any]:
+        """새로운 transcript를 받아 에이전트를 실행합니다 (비스트리밍).
 
         Args:
             speaker_id (str): 발화자 ID (peer_id)
@@ -113,13 +122,14 @@ class RoomAgent:
             text (str): 전사된 텍스트
             timestamp (float, optional): 타임스탬프. None이면 현재 시간 사용
 
-        Yields:
-            Dict[str, Any]: {"node_name": {업데이트된 State 부분}}
+        Returns:
+            Dict[str, Any]: {"current_summary": str (JSON), "last_summarized_index": int}
+                           또는 에러 시 {"error": {"message": str}}
 
         Example:
-            >>> async for chunk in agent.on_new_transcript("peer123", "김철수", "환불하고 싶어요"):
-            ...     print(chunk)
-            {"summarize": {"current_summary": "고객이 환불을 요청했습니다."}}
+            >>> result = await agent.on_new_transcript("peer123", "김철수", "환불하고 싶어요")
+            >>> print(result)
+            {"current_summary": '{"summary": "...", "customer_issue": "...", "agent_action": "..."}', ...}
         """
         if timestamp is None:
             timestamp = time.time()
@@ -141,55 +151,37 @@ class RoomAgent:
         # LLM 없으면 요약 생성 스킵 (transcript는 이미 추가됨)
         if not self.llm_available:
             logger.warning(f"⚠️ LLM not available - skipping summary generation for room '{self.room_name}'")
-            return
+            return {"error": {"message": "LLM not available"}}
 
-        # LangGraph 스트리밍 실행 (Runtime Context로 시스템 메시지 전달)
-        # stream_mode="messages": LLM의 각 토큰을 실시간으로 스트리밍
-        logger.info(f"🚀 Starting graph.astream for room '{self.room_name}'")
-        summary_chunks = []  # 요약 청크를 누적
+        # LangGraph 비스트리밍 실행 (Runtime Context로 시스템 메시지 전달)
+        logger.info(f"🚀 Starting graph.ainvoke for room '{self.room_name}'")
 
         try:
-            async for chunk in self.graph.astream(
+            # ainvoke로 한 번에 결과 받기 (비스트리밍)
+            result = await self.graph.ainvoke(
                 self.state,
-                stream_mode="messages",  # LLM 메시지 스트리밍
                 context={"system_message": self.system_message}  # Runtime Context 전달
-            ):
-                # chunk는 (message, metadata) 튜플 형태
-                message, metadata = chunk
-                logger.debug(f"📤 Message chunk received: {message}")
+            )
 
-                # AIMessage의 content만 추출
-                if hasattr(message, 'content') and message.content:
-                    content = message.content
-                    summary_chunks.append(content)
+            # 결과에서 요약 및 인덱스 추출
+            current_summary = result.get("current_summary", "")
+            last_summarized_index = result.get("last_summarized_index", 0)
 
-                    # 현재까지 누적된 요약을 State에 반영
-                    current_summary = "".join(summary_chunks)
-                    self.state["current_summary"] = current_summary
+            # State 업데이트
+            self.state["current_summary"] = current_summary
+            self.state["last_summarized_index"] = last_summarized_index
 
-                    # 각 청크를 즉시 yield (프론트엔드로 스트리밍)
-                    yield {
-                        "summarize": {
-                            "current_summary": current_summary,
-                            "is_streaming": True  # 스트리밍 중임을 표시
-                        }
-                    }
+            logger.info(f"✅ Summary generated (JSON): {current_summary[:100]}...")
+            logger.info(f"📊 Last summarized index: {last_summarized_index}")
 
-            # 스트리밍 완료 표시
-            if summary_chunks:
-                final_summary = "".join(summary_chunks)
-                self.state["current_summary"] = final_summary
-                yield {
-                    "summarize": {
-                        "current_summary": final_summary,
-                        "is_streaming": False  # 스트리밍 완료
-                    }
-                }
+            return {
+                "current_summary": current_summary,
+                "last_summarized_index": last_summarized_index
+            }
 
         except Exception as e:
             logger.error(f"❌ Error in agent execution: {e}", exc_info=True)
-            # 에러 발생 시에도 빈 업데이트 반환 (클라이언트가 멈추지 않도록)
-            yield {"error": {"message": str(e)}}
+            return {"error": {"message": str(e)}}
 
     def get_current_summary(self) -> str:
         """현재 대화 요약을 반환합니다.
@@ -218,6 +210,7 @@ class RoomAgent:
             "room_name": self.room_name,
             "conversation_history": [],
             "current_summary": "",
+            "last_summarized_index": 0,  # 증분 요약용 인덱스 초기화
             "messages": []  # MessagesState 필수 필드
         }
 

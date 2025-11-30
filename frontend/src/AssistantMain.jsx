@@ -47,11 +47,10 @@ function AssistantMain() {
   const [transcripts, setTranscripts] = useState([]);
   const transcriptContainerRef = useRef(null);
 
-  // AI 에이전트 요약
-  const [currentSummary, setCurrentSummary] = useState('');
+  // AI 에이전트 요약 (JSON 파싱)
+  const [parsedSummary, setParsedSummary] = useState(null); // {summary, customer_issue, agent_action}
   const [summaryTimestamp, setSummaryTimestamp] = useState(null); // 요약 수신 시간
   const [llmStatus, setLlmStatus] = useState('connecting'); // 'connecting' | 'ready' | 'connected' | 'failed'
-  const [isStreaming, setIsStreaming] = useState(false); // 스트리밍 중 여부
 
   // 비디오 refs
   const localVideoRef = useRef(null);
@@ -150,33 +149,38 @@ function AssistantMain() {
       }
     };
 
-    // AI 에이전트 업데이트 이벤트 핸들러 (스트리밍 지원)
+    // AI 에이전트 업데이트 이벤트 핸들러 (JSON 파싱)
     client.onAgentUpdate = (data) => {
       console.log('🤖 Agent update received:', data);
       // data.node: 노드 이름 (예: "summarize")
-      // data.data: 노드 출력 (예: {"current_summary": "...", "is_streaming": true})
+      // data.data: 노드 출력 (예: {"current_summary": "{\"summary\": \"...\", ...}"})
 
       // 에러 처리
       if (data.node === 'error') {
         setLlmStatus('failed');
-        setIsStreaming(false);
         console.error('❌ LLM error:', data.data.message);
         return;
       }
 
-      // 정상 요약 수신 (스트리밍 각 청크마다 업데이트)
+      // 정상 요약 수신 (JSON 파싱)
       if (data.node === 'summarize' && data.data.current_summary) {
         setLlmStatus('connected');
-        setCurrentSummary(data.data.current_summary); // 누적된 요약을 실시간 업데이트
         setSummaryTimestamp(Date.now()); // 요약 수신 시간 기록
 
-        // 스트리밍 상태 업데이트
-        if (data.data.is_streaming !== undefined) {
-          setIsStreaming(data.data.is_streaming);
+        // JSON 문자열 파싱 시도
+        try {
+          const summaryJson = JSON.parse(data.data.current_summary);
+          setParsedSummary(summaryJson);
+          console.log('📝 Summary parsed:', summaryJson);
+        } catch (parseError) {
+          // JSON 파싱 실패 시 원본 문자열을 summary 필드에 저장
+          console.warn('⚠️ Failed to parse summary JSON, using raw string:', parseError);
+          setParsedSummary({
+            summary: data.data.current_summary,
+            customer_issue: '',
+            agent_action: ''
+          });
         }
-
-        console.log(`📝 Summary ${data.data.is_streaming ? 'streaming' : 'completed'}:`,
-                    data.data.current_summary.substring(0, 50) + '...');
       }
     };
 
@@ -308,7 +312,7 @@ function AssistantMain() {
     try {
       setError('');
       setTranscripts([]);
-      setCurrentSummary('');
+      setParsedSummary(null);
       setLlmStatus('connecting');
       await webrtcClientRef.current.joinRoom(room.room_name, nicknameInput.trim());
       setRoomName(room.room_name);
@@ -331,7 +335,7 @@ function AssistantMain() {
     try {
       setError('');
       setTranscripts([]);
-      setCurrentSummary('');
+      setParsedSummary(null);
       setLlmStatus('connecting');
       await webrtcClientRef.current.joinRoom(roomInput.trim(), nicknameInput.trim());
       setRoomName(roomInput.trim());
@@ -379,7 +383,7 @@ function AssistantMain() {
     setPeerCount(0);
     setParticipants([]);
     setTranscripts([]);
-    setCurrentSummary('');
+    setParsedSummary(null);
     setSummaryTimestamp(null);
     setConnectionState('');
     setRoomInput('');
@@ -686,17 +690,27 @@ function AssistantMain() {
                 {formatDuration(getElapsedSeconds(summaryTimestamp))}
               </div>
             )}
-            <p className="summary-text">
-              {llmStatus === 'connecting' && 'LLM 연결 중...'}
-              {llmStatus === 'ready' && '✅ 요약 대기 중 (대화 시작 시 실시간 요약 생성)'}
-              {llmStatus === 'connected' && (
-                <>
-                  {currentSummary}
-                  {isStreaming && <span className="streaming-cursor">▊</span>}
-                </>
+            <div className="summary-content">
+              {llmStatus === 'connecting' && <p className="summary-text">LLM 연결 중...</p>}
+              {llmStatus === 'ready' && <p className="summary-text">✅ 요약 대기 중 (대화 시작 시 실시간 요약 생성)</p>}
+              {llmStatus === 'connected' && parsedSummary && (
+                <div className="summary-json">
+                  <div className="summary-field">
+                    <span className="summary-label">📝 요약:</span>
+                    <span className="summary-value">{parsedSummary.summary || '없음'}</span>
+                  </div>
+                  <div className="summary-field">
+                    <span className="summary-label">❓ 고객 문의:</span>
+                    <span className="summary-value">{parsedSummary.customer_issue || '없음'}</span>
+                  </div>
+                  <div className="summary-field">
+                    <span className="summary-label">💡 상담사 대응:</span>
+                    <span className="summary-value">{parsedSummary.agent_action || '없음'}</span>
+                  </div>
+                </div>
               )}
-              {llmStatus === 'failed' && '❌ LLM 연결 실패: 요약 기능을 사용할 수 없습니다. (STT는 정상 동작)'}
-            </p>
+              {llmStatus === 'failed' && <p className="summary-text error">❌ LLM 연결 실패: 요약 기능을 사용할 수 없습니다. (STT는 정상 동작)</p>}
+            </div>
           </div>
 
           {/* Real-time Conversation */}

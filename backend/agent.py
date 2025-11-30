@@ -61,17 +61,20 @@ class ConversationState(MessagesState):
         room_name (str): 방 이름 (세션 식별용)
         conversation_history (List[Dict]): 대화 히스토리
             각 항목: {"speaker_name": str, "text": str, "timestamp": float}
-        current_summary (str): 현재까지의 대화 요약
+        current_summary (str): 현재까지의 대화 요약 (JSON 형식)
+        last_summarized_index (int): 마지막으로 요약된 transcript 인덱스
     """
     room_name: str
     conversation_history: List[Dict[str, Any]]
     current_summary: str
+    last_summarized_index: int
 
 
 def create_summarize_node(llm: BaseChatModel):
     """LLM을 사용하는 summarize 노드 팩토리 함수.
 
-    Runtime Context 패턴을 사용하여 시스템 메시지를 자동으로 추가합니다.
+    증분 요약 패턴: 새로운 transcript만 처리하여 기존 요약을 업데이트합니다.
+    JSON 형식으로 엄격하게 출력합니다.
 
     Args:
         llm (BaseChatModel): 초기화된 LLM 인스턴스
@@ -83,10 +86,10 @@ def create_summarize_node(llm: BaseChatModel):
         state: ConversationState,
         runtime: Runtime[ContextSchema]
     ) -> Dict[str, Any]:
-        """대화 요약을 생성하는 노드 (Runtime Context 패턴).
+        """대화 요약을 증분 생성하는 노드.
 
-        대화 히스토리를 분석하여 LLM을 통해 요약을 생성합니다.
-        Runtime Context에서 시스템 메시지를 자동으로 가져와 적용합니다.
+        이전에 요약된 부분은 건너뛰고, 새로운 transcript만 처리하여
+        기존 요약을 업데이트합니다. JSON 형식으로 출력합니다.
 
         Args:
             state (ConversationState): 현재 대화 상태
@@ -94,81 +97,81 @@ def create_summarize_node(llm: BaseChatModel):
 
         Returns:
             Dict[str, Any]: {
-                "messages": [AIMessage],  # LLM 응답 메시지
-                "current_summary": str    # 요약 텍스트
+                "current_summary": str (JSON 형식),
+                "last_summarized_index": int
             }
-
-        Raises:
-            Exception: LLM 요약 생성 실패 시
-
-        Note:
-            - 대화 히스토리가 비어있으면 빈 요약 반환
-            - 시스템 메시지는 runtime.context.system_message에서 자동으로 가져옴
         """
-        logger.info("🔵 summarize_node started")
+        logger.info("🔵 summarize_node started (incremental mode)")
         conversation_history = state.get("conversation_history", [])
-        logger.info(f"📚 Conversation history length: {len(conversation_history)}")
+        last_summarized_index = state.get("last_summarized_index", 0)
+        current_summary = state.get("current_summary", "")
 
-        if not conversation_history:
-            logger.warning("⚠️ No conversation history, returning empty summary")
+        total_count = len(conversation_history)
+        logger.info(f"📚 Total history: {total_count}, Last summarized: {last_summarized_index}")
+
+        # 새로운 transcript가 없으면 기존 요약 반환
+        if last_summarized_index >= total_count:
+            logger.info("⏭️ No new transcripts, returning existing summary")
             return {
-                "messages": [],
-                "current_summary": ""
+                "current_summary": current_summary,
+                "last_summarized_index": last_summarized_index
             }
 
-        # 대화 히스토리를 텍스트로 포맷팅
-        formatted_conversation = []
-        for entry in conversation_history:
+        # 새로운 transcript만 추출
+        new_transcripts = conversation_history[last_summarized_index:]
+        logger.info(f"📝 Processing {len(new_transcripts)} new transcripts")
+
+        # 새로운 대화를 텍스트로 포맷팅
+        formatted_new = []
+        for entry in new_transcripts:
             speaker = entry.get("speaker_name", "Unknown")
             text = entry.get("text", "")
-            formatted_conversation.append(f"{speaker}: {text}")
+            formatted_new.append(f"{speaker}: {text}")
+        new_conversation_text = "\n".join(formatted_new)
 
-        conversation_text = "\n".join(formatted_conversation)
+        # 프롬프트 구성: 기존 요약 + 새 대화
+        if current_summary:
+            user_content = f"""기존 요약:
+{current_summary}
 
-        logger.info(f"📊 Generating summary for {len(conversation_history)} messages")
-        logger.info(f"📝 Conversation text: {conversation_text[:200]}...")
+새로운 대화:
+{new_conversation_text}
 
-        # 사용자 메시지 생성
-        user_msg = HumanMessage(content=conversation_text)
+위 기존 요약에 새로운 대화 내용을 반영하여 업데이트된 요약을 JSON으로 출력하세요."""
+        else:
+            user_content = f"""대화:
+{new_conversation_text}
+
+위 대화 내용을 요약하여 JSON으로 출력하세요."""
+
+        user_msg = HumanMessage(content=user_content)
         messages = [user_msg]
 
         # Runtime Context에서 시스템 메시지 가져오기
         if (system_message := runtime.context.system_message):
-            # 시스템 메시지를 messages 앞에 추가
             messages = [SystemMessage(system_message)] + messages
             logger.info("📝 System message added from runtime context")
-        else:
-            logger.warning("⚠️ No system message in runtime context")
 
-        # LLM 호출 (스트리밍)
-        logger.info("⏳ Calling LLM for summary...")
-        summary_chunks = []
-        first_chunk_received = False
+        # LLM 호출 (스트리밍 없이 한 번에)
+        logger.info("⏳ Calling LLM for incremental summary...")
+        try:
+            response = await llm.ainvoke(messages)
+            summary = response.content.strip()
+            logger.info(f"✅ Summary generated: {summary[:100]}...")
+        except Exception as e:
+            logger.error(f"❌ LLM call failed: {e}")
+            # 에러 시 기존 요약 유지
+            return {
+                "current_summary": current_summary,
+                "last_summarized_index": last_summarized_index
+            }
 
-        async for chunk in llm.astream(messages):
-            if not first_chunk_received:
-                logger.info("⚡ First token received (streaming started)!")
-                first_chunk_received = True
+        # 새로운 인덱스로 업데이트
+        new_last_index = total_count
 
-            # 청크 전체 구조 디버깅 (reasoning 모델 분석용)
-            logger.debug(f"🔍 Chunk: {chunk}")
-            logger.debug(f"🔍 Chunk.__dict__: {chunk.__dict__ if hasattr(chunk, '__dict__') else 'N/A'}")
-
-            # additional_kwargs 확인
-            if hasattr(chunk, 'additional_kwargs'):
-                logger.debug(f"🔍 additional_kwargs: {chunk.additional_kwargs}")
-
-            if hasattr(chunk, 'content') and chunk.content:
-                logger.debug(f"📝 Appending content: {chunk.content}")
-                summary_chunks.append(chunk.content)
-
-        summary = "".join(summary_chunks).strip()
-        logger.info(f"✅ Summary generated ({len(summary_chunks)} chunks): {summary[:100]}...")
-
-        # MessagesState가 자동으로 messages를 관리
         return {
-            "messages": [HumanMessage(content=conversation_text)],  # 대화 내용 저장
-            "current_summary": summary
+            "current_summary": summary,
+            "last_summarized_index": new_last_index
         }
 
     return summarize_node
