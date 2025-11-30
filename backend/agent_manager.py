@@ -71,13 +71,17 @@ class RoomAgent:
                 streaming=True
             )
 
-            # 시스템 메시지 (Runtime Context로 전달할 내용) - JSON 출력 강제
+            # 시스템 메시지 (Runtime Context로 전달할 내용) - JSON 출력 강제, 한 문장 요약 강조
             self.system_message = """
             # 역할
             고객 상담 대화를 요약하여 반드시 아래 JSON 형식으로만 출력하세요.
             다른 텍스트 없이 JSON만 출력하세요.
-            
-            {{"summary": "한 문장 요약", "customer_issue": "고객 문의사항", "agent_action": "상담사 대응"}}
+
+            # 중요 규칙
+            - summary 필드는 반드시 한 문장이어야 합니다 (20자 이내)
+            - 이전 요약을 참고하지 말고 현재 대화만 요약하세요
+
+            {{"summary": "한 문장 요약 (20자 이내)", "customer_issue": "고객 문의 한 줄", "agent_action": "상담사 대응 한 줄"}}
             # 예시:
             {{"summary": "고객이 환불을 요청함", "customer_issue": "제품 불량으로 환불 요청", "agent_action": "환불 절차 안내"}}
             """

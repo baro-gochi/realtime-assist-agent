@@ -142,38 +142,59 @@ function AssistantMain() {
 
     // AI 에이전트 업데이트 이벤트 핸들러 (JSON 파싱)
     client.onAgentUpdate = (data) => {
-      console.log('🤖 Agent update received:', data);
-      // data.node: 노드 이름 (예: "summarize")
-      // data.data: 노드 출력 (예: {"current_summary": "{\"summary\": \"...\", ...}"})
+      console.log('🤖 Agent update received:', JSON.stringify(data, null, 2));
+
+      // Null 체크
+      if (!data) {
+        console.warn('⚠️ Agent update received null data');
+        return;
+      }
 
       // 에러 처리
       if (data.node === 'error') {
         setLlmStatus('failed');
-        console.error('❌ LLM error:', data.data.message);
+        console.error('❌ LLM error:', data.data?.message);
         return;
       }
 
       // 정상 요약 수신 (JSON 파싱)
-      if (data.node === 'summarize' && data.data.current_summary) {
+      const currentSummary = data.data?.current_summary;
+      console.log('📥 Current summary raw:', currentSummary);
+
+      if (data.node === 'summarize' && currentSummary) {
         // JSON 문자열 파싱 시도
         try {
-          const summaryJson = JSON.parse(data.data.current_summary);
+          const summaryJson = JSON.parse(currentSummary);
+          console.log('✅ Summary parsed successfully:', summaryJson);
 
           // 파싱 성공 시에만 UI 업데이트
           setLlmStatus('connected');
-          setSummaryTimestamp(Date.now()); // 요약 수신 시간 기록
+          setSummaryTimestamp(Date.now());
           setParsedSummary(summaryJson);
-          console.log('📝 Summary parsed:', summaryJson);
         } catch (parseError) {
-          // JSON 파싱 실패 시 UI 업데이트 스킵 (이전 값 유지)
-          // 이렇게 하면 불완전한 JSON이 화면에 표시되지 않음
-          console.warn('⚠️ Failed to parse summary JSON, keeping previous value:', parseError.message);
-          console.debug('Raw content:', data.data.current_summary);
+          // JSON 파싱 실패 시 UI 업데이트 스킵
+          console.warn('⚠️ Failed to parse summary JSON:', parseError.message);
+          console.debug('Raw content:', currentSummary);
         }
+      } else {
+        console.warn('⚠️ Skipped update - node:', data.node, 'has summary:', !!currentSummary);
       }
     };
 
+    // 브라우저 종료/새로고침 시 즉시 정리 (beforeunload)
+    const handleBeforeUnload = () => {
+      console.log('🔴 beforeunload: Cleaning up WebRTC connection...');
+      if (client) {
+        // leaveRoom을 호출하여 서버에 즉시 알림
+        client.leaveRoom();
+        client.disconnect();
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
       if (client) {
         client.disconnect();
       }

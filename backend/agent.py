@@ -129,20 +129,20 @@ def create_summarize_node(llm: BaseChatModel):
             formatted_new.append(f"{speaker}: {text}")
         new_conversation_text = "\n".join(formatted_new)
 
-        # 프롬프트 구성: 기존 요약 + 새 대화
-        if current_summary:
-            user_content = f"""기존 요약:
-{current_summary}
+        # 프롬프트 구성: 전체 대화 내용을 한 문장으로 요약 (덮어쓰기 방식)
+        # 전체 대화를 다시 요약하여 항상 최신 한 문장 요약 유지
+        all_formatted = []
+        for entry in conversation_history:
+            speaker = entry.get("speaker_name", "Unknown")
+            text = entry.get("text", "")
+            all_formatted.append(f"{speaker}: {text}")
+        all_conversation_text = "\n".join(all_formatted)
 
-새로운 대화:
-{new_conversation_text}
+        user_content = f"""전체 대화:
+{all_conversation_text}
 
-위 기존 요약에 새로운 대화 내용을 반영하여 업데이트된 요약을 JSON으로 출력하세요."""
-        else:
-            user_content = f"""대화:
-{new_conversation_text}
-
-위 대화 내용을 요약하여 JSON으로 출력하세요."""
+위 전체 대화 내용을 한 문장으로 요약하여 JSON으로 출력하세요.
+요약은 반드시 한 문장이어야 합니다."""
 
         user_msg = HumanMessage(content=user_content)
         messages = [user_msg]
