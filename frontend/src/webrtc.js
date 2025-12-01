@@ -472,13 +472,13 @@ export class WebRTCClient {
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: {
-          // 오디오 품질 설정
-          sampleRate: 48000,           // 48kHz - 고품질 오디오
+          // 오디오 품질 설정 - 32kbps 비트레이트에 최적화
+          sampleRate: 32000,           // 32kHz - 32kbps에 적합한 super-wideband
           sampleSize: 16,              // 16비트
           channelCount: 1,             // 모노 (대화용)
           // 음성 처리 설정 - 네트워크 환경에 따라 조정
           echoCancellation: true,      // 에코 제거
-          noiseSuppression: false,     // 노이즈 억제 끔 (로봇 소리 방지)
+          noiseSuppression: false,     // 노이즈 억제 끔
           autoGainControl: true,       // 자동 게인 조절
           // 지연 최소화
           latency: 0                   // 최소 지연
@@ -572,8 +572,13 @@ export class WebRTCClient {
     // Add local tracks to peer connection
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
-        this.pc.addTrack(track, this.localStream);
+        const sender = this.pc.addTrack(track, this.localStream);
         console.log('Added local track:', track.kind);
+
+        // 오디오 트랙에 비트레이트 제한 설정 (32kbps)
+        if (track.kind === 'audio') {
+          this.setAudioBitrate(sender, 32000);
+        }
       });
     }
 
@@ -1107,5 +1112,42 @@ export class WebRTCClient {
       return audioTracks.length > 0 && audioTracks[0].enabled;
     }
     return false;
+  }
+
+  /**
+   * 오디오 비트레이트를 설정합니다
+   *
+   * @async
+   * @param {RTCRtpSender} sender - RTCRtpSender 객체
+   * @param {number} bitrate - 비트레이트 (bps 단위, 예: 32000 = 32kbps)
+   *
+   * @description
+   * RTCRtpSender.setParameters()를 사용하여 오디오 비트레이트를 제한합니다.
+   * 이를 통해 네트워크 대역폭 사용을 최적화할 수 있습니다.
+   *
+   * @example
+   * const sender = this.pc.addTrack(audioTrack, stream);
+   * await this.setAudioBitrate(sender, 32000); // 32kbps로 제한
+   */
+  async setAudioBitrate(sender, bitrate) {
+    try {
+      const params = sender.getParameters();
+
+      // encodings 배열이 없으면 초기화
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+
+      // 각 인코딩에 maxBitrate 설정
+      params.encodings.forEach(encoding => {
+        encoding.maxBitrate = bitrate;
+      });
+
+      await sender.setParameters(params);
+      console.log(`🎵 Audio bitrate set to ${bitrate / 1000}kbps`);
+    } catch (error) {
+      console.warn('⚠️ Failed to set audio bitrate:', error.message);
+      // 비트레이트 설정 실패는 치명적이지 않으므로 에러를 던지지 않음
+    }
   }
 }

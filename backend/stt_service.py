@@ -131,7 +131,7 @@ class STTService:
 
         self.model = model or os.getenv("STT_MODEL", "short")
         self.sample_rate = TARGET_SAMPLE_RATE
-        self.input_sample_rate = 48000  # WebRTC 입력 샘플레이트
+        self.input_sample_rate = int(os.getenv("STT_SAMPLE_RATE_HERTZ", "32000"))  # WebRTC 입력 샘플레이트 (32kbps 비트레이트에 최적화)
 
         # Location 설정 (리전별 엔드포인트 지원)
         self.location = os.getenv("STT_LOCATION", "global")
@@ -473,8 +473,8 @@ class STTService:
                         chunk_size = len(audio_bytes)
                         if chunk_size > 25000:
                             logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
-                            for i in range(0, len(audio_bytes), 24000):
-                                chunk = audio_bytes[i:i+24000]
+                            for i in range(0, len(audio_bytes), self.input_sample_rate):
+                                chunk = audio_bytes[i:i+self.input_sample_rate]
                                 yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
                         else:
                             yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
