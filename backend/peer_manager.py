@@ -46,14 +46,10 @@ See Also:
 """
 import asyncio
 import logging
-import time
-from fractions import Fraction
 from typing import Dict, Optional, Callable, List
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
 from aiortc.rtcicetransport import RTCIceCandidate
-from av import AudioFrame
-import numpy as np
 from stt_service import STTService
 from elevenlabs_stt_service import ElevenLabsSTTService
 
@@ -63,198 +59,6 @@ logger = logging.getLogger(__name__)
 STT_ENGINE_GOOGLE = "google"
 STT_ENGINE_ELEVENLABS = "elevenlabs"
 MAX_WAIT = 5.0
-
-# Audio constants for Opus codec
-SAMPLE_RATE = 48000  # 48kHz (Opus standard)
-FRAME_DURATION_MS = 20  # 20ms per frame (Opus standard)
-SAMPLES_PER_FRAME = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)  # 960 samples
-
-
-class PacedRelayTrack(MediaStreamTrack):
-    """정확한 20ms 간격으로 오디오 프레임을 pacing하는 릴레이 트랙.
-
-    MediaRelay에서 받은 프레임을 버퍼링하고, 정확히 20ms 간격으로
-    프레임을 전달하여 RTP timestamp drift를 방지합니다.
-
-    이 트랙을 사용하면:
-    - jitterBufferDelay가 선형으로 증가하는 문제 해결
-    - RTP timestamp가 정확히 960씩 증가
-    - 실제 송출 시간이 정확히 20ms 간격으로 유지
-
-    Attributes:
-        kind (str): 트랙 종류 ("audio")
-        source (MediaStreamTrack): 소스 오디오 트랙 (MediaRelay에서 구독한 트랙)
-        sample_rate (int): 샘플레이트 (기본값: 48000)
-        frame_duration_ms (int): 프레임 길이 ms (기본값: 20)
-
-    Note:
-        - 소스 트랙의 timestamp를 무시하고 자체적으로 재계산
-        - 버퍼가 비면 silence 프레임 생성
-        - monotonic clock 기반으로 정확한 pacing 보장
-    """
-    kind = "audio"
-
-    def __init__(
-        self,
-        source: MediaStreamTrack,
-        sample_rate: int = SAMPLE_RATE,
-        frame_duration_ms: int = FRAME_DURATION_MS
-    ):
-        """PacedRelayTrack 초기화.
-
-        Args:
-            source (MediaStreamTrack): 소스 오디오 트랙
-            sample_rate (int): 샘플레이트 (기본값: 48000)
-            frame_duration_ms (int): 프레임 길이 ms (기본값: 20)
-        """
-        super().__init__()
-        self.source = source
-        self.sample_rate = sample_rate
-        self.frame_duration_ms = frame_duration_ms
-        self.samples_per_frame = int(sample_rate * frame_duration_ms / 1000)
-
-        # Pacing state
-        self._buffer: asyncio.Queue = asyncio.Queue(maxsize=50)  # ~1초 버퍼
-        self._pts = 0
-        self._time_base = Fraction(1, sample_rate)
-        self._start_time: Optional[float] = None
-        self._frame_index = 0
-        self._consumer_task: Optional[asyncio.Task] = None
-        self._stopped = False
-
-        # Debug counters
-        self._frames_received = 0
-        self._frames_sent = 0
-        self._silence_frames = 0
-
-    async def _consume_source(self):
-        """소스 트랙에서 프레임을 읽어 버퍼에 저장하는 백그라운드 태스크."""
-        try:
-            while not self._stopped:
-                try:
-                    frame = await self.source.recv()
-                    self._frames_received += 1
-
-                    # 버퍼에 저장 (가득 차면 오래된 프레임은 버림)
-                    try:
-                        self._buffer.put_nowait(frame)
-                    except asyncio.QueueFull:
-                        # 버퍼 오버플로우 - 오래된 프레임 제거 후 새 프레임 추가
-                        try:
-                            self._buffer.get_nowait()
-                            self._buffer.put_nowait(frame)
-                        except asyncio.QueueEmpty:
-                            pass
-
-                    if self._frames_received == 1:
-                        logger.info(f"🎵 PacedRelayTrack: First frame received from source")
-                    elif self._frames_received % 500 == 0:
-                        logger.debug(f"🎵 PacedRelayTrack: {self._frames_received} frames buffered")
-
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"❌ PacedRelayTrack consumer error: {e}")
-                    break
-        finally:
-            logger.info(f"🏁 PacedRelayTrack consumer stopped. Received: {self._frames_received}")
-
-    def _create_silence_frame(self) -> AudioFrame:
-        """무음 프레임 생성.
-
-        버퍼가 비어있을 때 호출되어 연속적인 오디오 스트림을 유지합니다.
-
-        Returns:
-            AudioFrame: 무음 오디오 프레임
-        """
-        # Create silent PCM data (16-bit signed, mono)
-        silence = np.zeros(self.samples_per_frame, dtype=np.int16)
-
-        frame = AudioFrame(format="s16", layout="mono", samples=self.samples_per_frame)
-        frame.sample_rate = self.sample_rate
-        frame.pts = self._pts
-        frame.time_base = self._time_base
-
-        # Copy silence data to frame
-        for plane in frame.planes:
-            plane.update(silence.tobytes())
-
-        return frame
-
-    async def recv(self) -> AudioFrame:
-        """정확한 20ms 간격으로 오디오 프레임을 반환합니다.
-
-        Returns:
-            AudioFrame: 오디오 프레임 (버퍼의 프레임 또는 무음)
-
-        Note:
-            - 첫 호출 시 소스 소비 태스크 시작
-            - 첫 프레임 도착까지 대기 (초기 버퍼링)
-            - monotonic clock 기반으로 정확한 타이밍 유지
-            - timestamp는 항상 960씩 정확히 증가
-        """
-        # 소스 소비 태스크 시작 (최초 1회)
-        if self._consumer_task is None:
-            self._consumer_task = asyncio.create_task(self._consume_source())
-            # 첫 프레임이 버퍼에 도착할 때까지 대기 (최대 2초)
-            logger.info("🎵 PacedRelayTrack: Waiting for first frame from source...")
-            for _ in range(100):  # 100 * 20ms = 2초
-                if not self._buffer.empty():
-                    logger.info("🎵 PacedRelayTrack: Initial buffer ready, starting pacing")
-                    break
-                await asyncio.sleep(0.02)
-            else:
-                logger.warning("⚠️ PacedRelayTrack: Timeout waiting for first frame, starting anyway")
-
-        # 시작 시간 설정 (최초 1회)
-        if self._start_time is None:
-            self._start_time = time.perf_counter()
-
-        # 정확한 타이밍 계산 및 대기
-        target_time = self._start_time + (self._frame_index * self.frame_duration_ms) / 1000.0
-        now = time.perf_counter()
-        wait = target_time - now
-
-        if wait > 0:
-            await asyncio.sleep(wait)
-
-        self._frame_index += 1
-
-        # 버퍼에서 프레임 가져오기
-        try:
-            frame = self._buffer.get_nowait()
-        except asyncio.QueueEmpty:
-            # 버퍼가 비어있으면 silence 프레임 생성
-            frame = self._create_silence_frame()
-            self._silence_frames += 1
-            if self._silence_frames == 1:
-                logger.warning("⚠️ PacedRelayTrack: Buffer empty, generating silence")
-            elif self._silence_frames % 50 == 0:
-                logger.warning(f"⚠️ PacedRelayTrack: {self._silence_frames} silence frames generated")
-
-        # timestamp 재설정 (정확히 960씩 증가)
-        frame.pts = self._pts
-        frame.time_base = self._time_base
-        self._pts += self.samples_per_frame
-
-        self._frames_sent += 1
-
-        if self._frames_sent == 1:
-            logger.info(f"🎵 PacedRelayTrack: First frame sent with pts={frame.pts}")
-        elif self._frames_sent % 500 == 0:
-            logger.debug(f"🎵 PacedRelayTrack: {self._frames_sent} frames sent, "
-                        f"buffer_size={self._buffer.qsize()}, silence={self._silence_frames}")
-
-        return frame
-
-    def stop(self):
-        """트랙을 중지하고 리소스를 정리합니다."""
-        self._stopped = True
-        if self._consumer_task and not self._consumer_task.done():
-            self._consumer_task.cancel()
-        super().stop()
-        logger.info(f"🛑 PacedRelayTrack stopped. Sent: {self._frames_sent}, "
-                   f"Received: {self._frames_received}, Silence: {self._silence_frames}")
 
 
 class AudioRelayTrack(MediaStreamTrack):
@@ -672,14 +476,10 @@ class PeerConnectionManager:
             if (peer_id != source_peer_id and
                 self.peer_rooms.get(peer_id) == room_name and
                 pc.connectionState != "closed"):
-                # CRITICAL: Use PacedRelayTrack for stable RTP timestamps
-                # 1. MediaRelay.subscribe() for independent frame buffer
-                # 2. PacedRelayTrack wraps it with precise 20ms pacing
-                # This prevents jitterBufferDelay from linearly increasing
+                # MediaRelay.subscribe() for independent frame buffer per peer
                 relayed_track = self.relay.subscribe(track)
-                paced_track = PacedRelayTrack(relayed_track)
-                pc.addTrack(paced_track)
-                logger.info(f"Relaying {track.kind} from {source_peer_id} to {peer_id} in room '{room_name}' (via PacedRelayTrack)")
+                pc.addTrack(relayed_track)
+                logger.info(f"Relaying {track.kind} from {source_peer_id} to {peer_id} in room '{room_name}'")
 
     async def handle_offer(
         self,
@@ -753,7 +553,6 @@ class PeerConnectionManager:
             )
 
             # NOW add NEW tracks from other peers (skip already added tracks)
-            # CRITICAL: Use PacedRelayTrack for stable RTP timestamps
             tracks_added = 0
             for other_peer_id in other_peers_in_room:
                 if other_peer_id != peer_id:
@@ -761,12 +560,10 @@ class PeerConnectionManager:
                     if other_peer_id in self.audio_tracks:
                         original_track = self.audio_tracks[other_peer_id]
                         if original_track.id not in current_track_ids:
-                            # 1. MediaRelay.subscribe() for independent frame buffer
-                            # 2. PacedRelayTrack wraps it with precise 20ms pacing
+                            # MediaRelay.subscribe() for independent frame buffer
                             relayed_track = self.relay.subscribe(original_track)
-                            paced_track = PacedRelayTrack(relayed_track)
-                            pc.addTrack(paced_track)
-                            logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id} (via PacedRelayTrack)")
+                            pc.addTrack(relayed_track)
+                            logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id}")
                             tracks_added += 1
                         else:
                             logger.info(f"⏭️ Skipped existing audio track from {other_peer_id}")
@@ -796,18 +593,15 @@ class PeerConnectionManager:
         pc = await self.create_peer_connection(peer_id, room_name, other_peers_in_room)
 
         # Add audio tracks from other peers in the room
-        # CRITICAL: Use PacedRelayTrack for stable RTP timestamps
         for other_peer_id in other_peers_in_room:
             if other_peer_id != peer_id:
                 # Add audio track if exists
                 if other_peer_id in self.audio_tracks:
                     original_track = self.audio_tracks[other_peer_id]
-                    # 1. MediaRelay.subscribe() for independent frame buffer
-                    # 2. PacedRelayTrack wraps it with precise 20ms pacing
+                    # MediaRelay.subscribe() for independent frame buffer
                     relayed_track = self.relay.subscribe(original_track)
-                    paced_track = PacedRelayTrack(relayed_track)
-                    pc.addTrack(paced_track)
-                    logger.info(f"Added audio track from {other_peer_id} to {peer_id} (via PacedRelayTrack)")
+                    pc.addTrack(relayed_track)
+                    logger.info(f"Added audio track from {other_peer_id} to {peer_id}")
 
         # Set remote description (offer)
         await pc.setRemoteDescription(
