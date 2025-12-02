@@ -5,15 +5,7 @@
  * 이 파일은 WebRTC를 사용한 실시간 음성 통화 기능을 제공합니다.
  * 서버의 시그널링 서버와 통신하여 피어 간 연결을 설정하고 오디오를 주고받습니다.
  *
- * 주요 개념 (초보자 필독):
- * - WebRTC: 웹 브라우저 간 실시간 통신 기술 (마이크, 오디오 스트림)
- * - WebSocket: 서버와 실시간 양방향 통신을 위한 기술
- * - 시그널링: WebRTC 연결을 설정하기 위한 초기 정보 교환 과정
- * - SDP (Session Description Protocol): 연결 정보를 담은 데이터 형식
- * - ICE Candidate: 네트워크 경로 정보
- * - MediaStream: 마이크에서 오는 오디오 데이터 흐름
- *
- * 연결 과정 (순서대로):
+ * 연결 과정:
  * 1. WebSocket으로 시그널링 서버에 연결
  * 2. 룸(방)에 참가
  * 3. 마이크 권한 요청 및 로컬 오디오 획득
@@ -47,25 +39,8 @@
  * @description
  * 룸 기반 음성 통화를 위한 WebRTC 클라이언트입니다.
  * 시그널링 서버와 통신하여 다른 참가자들과 실시간으로 오디오를 주고받습니다.
- *
- * @tutorial
- * WebRTC 연결 과정 이해하기:
- *
- * 1단계: 시그널링 (Signaling)
- *    - WebSocket으로 서버에 연결
- *    - 룸에 참가하여 다른 참가자들과 만남
- *    - 연결 정보(SDP)를 서버를 통해 교환
- *
- * 2단계: ICE (Interactive Connectivity Establishment)
- *    - 네트워크 경로를 찾는 과정
- *    - STUN 서버가 공인 IP를 찾아줌
- *    - 가능한 모든 연결 경로를 시도
- *
- * 3단계: 오디오 전송
- *    - P2P 연결이 완료되면 직접 오디오 전송
- *    - 서버는 더 이상 오디오 데이터를 중계하지 않음
- *    - 낮은 지연시간으로 실시간 통화 가능
  */
+
 export class WebRTCClient {
   /**
    * WebRTCClient 생성자
@@ -110,6 +85,8 @@ export class WebRTCClient {
    *   document.getElementById('remoteAudio').srcObject = stream;
    * };
    */
+
+
   constructor(signalingUrl = 'ws://localhost:8000/ws', authToken = null) {
     this.signalingUrl = signalingUrl;
     this.authToken = authToken || sessionStorage.getItem('auth_token');
@@ -121,7 +98,7 @@ export class WebRTCClient {
     this.localStream = null;
     this.remoteStream = new MediaStream();
     this.needsRenegotiation = false; // 재협상 필요 여부 플래그
-    this.turnServers = null; // Cached TURN credentials
+    this.turnServers = null; // 캐시된 TURN 자격 증명
 
     // Event callbacks (이벤트가 발생했을 때 실행할 함수들)
     this.onPeerId = null;
@@ -132,28 +109,29 @@ export class WebRTCClient {
     this.onConnectionStateChange = null;
     this.onError = null;
     this.onTranscript = null; // STT transcript 이벤트 콜백
-    this.onDualSttStatus = null; // Dual STT 상태 변경 콜백
     this.onLocalStream = null; // 로컬 스트림 획득 콜백
 
-    // Prefetch TURN credentials on construction
+    // Prefetch TURN 자격 증명 on construction
     this.prefetchTurnCredentials();
   }
 
   /**
-   * Prefetch TURN credentials in the background
+   * TURN 자격 증명을 백그라운드에서 미리 가져옵니다.
    *
    * @async
    * @description
-   * Fetches TURN server credentials from backend and caches them.
-   * This runs in background to avoid blocking createPeerConnection().
+   * TURN 서버 자격 증명을 가져옵니다. 백엔드에서 받아와 캐시합니다.
+   * 백그라운드에서 동작하고 있어 createPeerConnection()에서 차단되지 않습니다.
    */
   async prefetchTurnCredentials() {
     try {
-      const backendUrl = `${window.location.protocol}//${window.location.host}/api/turn-credentials`;
+      // 환경변수 우선, 없으면 현재 호스트 사용
+      const apiBase = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.host}`;
+      const backendUrl = `${apiBase}/api/turn-credentials`;
       console.log('🔄 Prefetching TURN credentials from:', backendUrl);
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
 
       const headers = {};
       if (this.authToken) {
@@ -273,10 +251,10 @@ export class WebRTCClient {
    * @param {Object} message.data - 메시지 데이터
    *
    * @description
-   * 서버로부터 받은 여러 종류의 메시지를 처리합니다.
+   * 서버로부터 받은 메시지들을 처리합니다.
    * 각 메시지 타입에 따라 다른 동작을 수행합니다.
    *
-   * 처리하는 메시지 타입:
+   * 처리 메시지 타입:
    * - peer_id: 서버가 할당한 나의 고유 ID
    * - room_joined: 룸 참가 성공 알림
    * - user_joined: 다른 사용자 입장 알림
@@ -352,13 +330,6 @@ export class WebRTCClient {
         }
         break;
 
-      case 'dual_stt_status':
-        console.log('🔄 Dual STT status:', data);
-        if (this.onDualSttStatus) {
-          this.onDualSttStatus(data);
-        }
-        break;
-
       case 'agent_ready':
         console.log('🤖 Agent ready:', data);
         if (this.onAgentReady) {
@@ -370,7 +341,6 @@ export class WebRTCClient {
         console.log('🤖 Agent update received - full message:', message);
         console.log('🤖 Agent update - node:', message.node, 'data:', message.data);
         if (this.onAgentUpdate) {
-          // node와 data를 모두 포함한 객체 전달
           this.onAgentUpdate({
             node: message.node,
             data: message.data
@@ -399,7 +369,7 @@ export class WebRTCClient {
    * @description
    * 지정된 이름의 룸에 참가 요청을 보냅니다.
    * 룸이 존재하지 않으면 자동으로 생성됩니다.
-   * 같은 룸에 있는 다른 참가자들과 화상 통화를 할 수 있게 됩니다.
+   * 같은 룸에 있는 다른 참가자들과 음성 통화를 할 수 있게 됩니다.
    *
    * @example
    * const client = new WebRTCClient();
@@ -435,7 +405,7 @@ export class WebRTCClient {
    *
    * @async
    * @returns {Promise<MediaStream>} 로컬 오디오 스트림
-   * @throws {Error} 마이크 접근 권한이 없거나 기기가 없으면 에러 발생
+   * @throws {Error} 미디어 접근 권한이 없거나 기기가 없으면 에러 발생
    *
    * @description
    * 사용자의 마이크에 접근하여 오디오 스트림을 가져옵니다.
@@ -472,16 +442,11 @@ export class WebRTCClient {
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: false,
         audio: {
-          // 오디오 품질 설정 - 32kbps 비트레이트에 최적화
-          sampleRate: 32000,           // 32kHz - 32kbps에 적합한 super-wideband
-          sampleSize: 16,              // 16비트
-          channelCount: 1,             // 모노 (대화용)
-          // 음성 처리 설정 - 네트워크 환경에 따라 조정
-          echoCancellation: true,      // 에코 제거
-          noiseSuppression: false,     // 노이즈 억제 끔
-          autoGainControl: true,       // 자동 게인 조절
-          // 지연 최소화
-          latency: 0                   // 최소 지연
+          sampleRate: 48000,           // 48kHz 샘플레이트 (Opus 권장)
+          channelCount: 1,             // 모노 (음성 통화)
+          autoGainControl: true,       // 볼륨 자동 조절
+          echoCancellation: false,     // 에코 제거 끄기
+          noiseSuppression: false,     // 노이즈 제거 끄기
         }
       });
       console.log('✅ Local audio stream obtained');
@@ -493,15 +458,15 @@ export class WebRTCClient {
       console.error('❌ Error message:', error.message);
 
       // Show user-friendly error
-      let userMessage = 'Failed to access microphone: ';
+      let userMessage = '마이크 접근 실패: ';
       if (error.name === 'NotAllowedError') {
-        userMessage += 'Permission denied. Please allow microphone access.';
+        userMessage += '권한이 거부되었습니다. 마이크 접근을 허용해주세요.';
       } else if (error.name === 'NotFoundError') {
-        userMessage += 'No microphone found on this device.';
+        userMessage += '마이크를 찾을 수 없습니다.';
       } else if (error.name === 'NotReadableError') {
-        userMessage += 'Microphone is already in use by another application.';
+        userMessage += '마이크가 다른 앱에서 사용 중입니다.';
       } else if (error.name === 'NotSecureError' || !window.isSecureContext) {
-        userMessage += 'Microphone requires HTTPS. Please use https:// URL.';
+        userMessage += 'HTTPS 연결이 필요합니다.';
       } else {
         userMessage += error.message;
       }
@@ -523,15 +488,15 @@ export class WebRTCClient {
    *
    * 주요 작업:
    * 1. RTCPeerConnection 생성 (STUN 서버 설정)
-   * 2. 로컬 오디오 트랙 추가
+   * 2. 로컬 미디어 트랙 추가
    * 3. 이벤트 핸들러 등록:
-   *    - ontrack: 상대방 오디오 수신
+   *    - ontrack: 상대방 미디어 수신
    *    - onicecandidate: 네트워크 경로 정보 생성
    *    - onconnectionstatechange: 연결 상태 변경
    * 4. SDP Offer 생성 및 전송
    *
    * @example
-   * await client.getLocalMedia(); // 먼저 로컬 오디오 획득
+   * await client.getLocalMedia(); // 먼저 로컬 미디어 획득
    * await client.createPeerConnection(); // 그 다음 피어 연결 생성
    *
    * @tutorial
@@ -541,14 +506,14 @@ export class WebRTCClient {
    * - NAT 뒤에 있는 컴퓨터들이 통신할 수 있게 도와줌
    *
    * SDP Offer란?
-   * - "이런 오디오를 보낼 수 있어요"라는 제안
-   * - 지원하는 코덱 등의 정보 포함
+   * - "이런 미디어를 보낼 수 있어요"라는 제안
+   * - 지원하는 코덱, 해상도 등의 정보 포함
    * - 상대방이 answer로 응답함
    */
   async createPeerConnection() {
     // Use prefetched TURN credentials from AWS coturn or fetch if not available
     let iceServers = [
-      // Google STUN server (backup)
+      // Google STUN server
       { urls: 'stun:stun.l.google.com:19302' }
     ];
 
@@ -563,22 +528,13 @@ export class WebRTCClient {
 
     // Create RTCPeerConnection with fetched ICE servers
     // Use all available connection methods (STUN + TURN)
-    // TURN will be preferred if available, but STUN is fallback
-    this.pc = new RTCPeerConnection({
-      iceServers
-      // iceTransportPolicy: 'all' (default) - allows both direct and relayed connections
-    });
+    this.pc = new RTCPeerConnection({iceServers});
 
     // Add local tracks to peer connection
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
-        const sender = this.pc.addTrack(track, this.localStream);
+        this.pc.addTrack(track, this.localStream);
         console.log('Added local track:', track.kind);
-
-        // 오디오 트랙에 비트레이트 제한 설정 (32kbps)
-        if (track.kind === 'audio') {
-          this.setAudioBitrate(sender, 32000);
-        }
       });
     }
 
@@ -587,6 +543,21 @@ export class WebRTCClient {
       console.log('🎥 Received remote track:', event.track.kind);
       console.log('🎥 Track ID:', event.track.id);
       console.log('🎥 Track state:', event.track.readyState);
+
+      // 오디오 재생 지연 버퍼 설정 (패킷 손실/지터로 인한 끊김 방지)
+      if (event.receiver && event.track.kind === 'audio') {
+        // jitter buffer 설정 증가 (로봇 소리 방지)
+        // 150ms 버퍼로 네트워크 지터 흡수
+        event.receiver.playoutDelayHint = 0.15; // 150ms 재생 지연
+
+        // jitterBufferTarget 설정 (지원하는 브라우저에서)
+        if ('jitterBufferTarget' in event.receiver) {
+          event.receiver.jitterBufferTarget = 150; // 150ms 타겟
+          console.log('🔊 Jitter buffer target set to 150ms');
+        }
+
+        console.log('🔊 Audio playout delay hint set to 150ms');
+      }
 
       // Add only the received track (not all tracks from stream)
       const track = event.track;
@@ -605,7 +576,7 @@ export class WebRTCClient {
       console.log('🎤 Remote stream now has tracks:',
         currentTracks.map(t => `${t.kind}:${t.id}:${t.readyState}`));
 
-      // onRemoteStream 콜백은 오디오 트랙이 있을 때 호출
+      // 오디오 트랙이 있으면 콜백 호출
       const hasAudio = currentTracks.some(t => t.kind === 'audio');
 
       if (hasAudio && this.onRemoteStream) {
@@ -643,6 +614,11 @@ export class WebRTCClient {
 
     // Create and send offer
     const offer = await this.pc.createOffer();
+
+    // DTX(Discontinuous Transmission) 비활성화
+    // 침묵 구간에서도 패킷을 계속 전송하여 jitter buffer 안정화
+    offer.sdp = this.disableDTX(offer.sdp);
+
     await this.pc.setLocalDescription(offer);
 
     console.log('Sending offer to server');
@@ -742,12 +718,6 @@ export class WebRTCClient {
    * case 'ice_candidate':
    *   await this.handleIceCandidate(data);
    *   break;
-   *
-   * @tutorial
-   * ICE Candidate란?
-   * - 네트워크 경로를 찾기 위한 정보
-   * - 여러 개가 생성되며 모두 교환해야 함
-   * - 최적의 경로를 자동으로 선택
    */
   async handleIceCandidate(candidateData) {
     try {
@@ -847,12 +817,6 @@ export class WebRTCClient {
    * case 'renegotiation_needed':
    *   await this.renegotiate();
    *   break;
-   *
-   * @tutorial
-   * 재협상이 필요한 이유:
-   * - WebRTC는 offer/answer 교환 시점의 트랙만 전송
-   * - 새 피어가 입장하면 기존 피어는 새 트랙을 받을 수 없음
-   * - 재협상을 통해 새로운 트랙 정보를 교환
    */
   async renegotiate() {
     try {
@@ -865,6 +829,10 @@ export class WebRTCClient {
 
       // Create new offer
       const offer = await this.pc.createOffer();
+
+      // DTX 비활성화 적용
+      offer.sdp = this.disableDTX(offer.sdp);
+
       await this.pc.setLocalDescription(offer);
 
       // Send new offer to server
@@ -891,7 +859,7 @@ export class WebRTCClient {
    * 이 메서드 하나로 통화 준비를 완료할 수 있습니다.
    *
    * 실행 순서:
-   * 1. getLocalMedia(): 마이크 권한 요청 및 오디오 스트림 획득
+   * 1. getLocalMedia(): 마이크 권한 요청 및 스트림 획득
    * 2. createPeerConnection(): WebRTC 연결 생성 및 offer 전송
    *
    * @example
@@ -899,15 +867,7 @@ export class WebRTCClient {
    * await client.connect();
    * await client.joinRoom('상담실1', '홍길동');
    *
-   * // 통화 시작!
    * await client.startCall();
-   *
-   * @tutorial
-   * 통화 시작 전 체크리스트:
-   * 1. ✅ WebSocket 연결 완료 (connect)
-   * 2. ✅ 룸 참가 완료 (joinRoom)
-   * 3. ✅ 마이크 권한 승인
-   * 4. ✅ 네트워크 연결 상태 양호
    */
   async startCall() {
     try {
@@ -963,13 +923,6 @@ export class WebRTCClient {
    * @example
    * client.stopCall();
    * // 마이크가 꺼지고 통화가 완전히 종료됨
-   *
-   * @tutorial
-   * track.stop()이 중요한 이유:
-   * - 마이크의 활성 LED가 꺼짐
-   * - 다른 앱에서 마이크를 사용할 수 있게 됨
-   * - 시스템 리소스 절약
-   * - 배터리 수명 향상
    */
   stopCall() {
     // Stop local tracks
@@ -1015,13 +968,6 @@ export class WebRTCClient {
    *   client.disconnect();
    *   navigate('/'); // 메인 페이지로 이동
    * }
-   *
-   * @tutorial
-   * 언제 disconnect를 호출해야 할까요?
-   * - 앱 종료 시
-   * - 다른 페이지로 이동 시
-   * - 로그아웃 시
-   * - "연결 끊기" 버튼 클릭 시
    */
   disconnect() {
     this.leaveRoom();
@@ -1042,7 +988,7 @@ export class WebRTCClient {
    * @param {boolean} [constraints.audio=true] - 오디오 활성화 여부
    * @returns {Promise<MediaStream>} 로컬 오디오 스트림
    */
-  async startLocalStream(constraints = { audio: true }) {
+  async startLocalStream(constraints = { audio: true, video: false }) {
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
       console.log('🎤 Local stream started:', this.localStream.getTracks().map(t => t.kind));
@@ -1069,7 +1015,7 @@ export class WebRTCClient {
   }
 
   /**
-   * 로컬 오디오 스트림을 중지합니다.
+   * 로컬 미디어 스트림을 중지합니다.
    */
   stopLocalStream() {
     if (this.localStream) {
@@ -1115,39 +1061,62 @@ export class WebRTCClient {
   }
 
   /**
-   * 오디오 비트레이트를 설정합니다
+   * SDP에서 Opus DTX(Discontinuous Transmission)를 비활성화합니다
    *
-   * @async
-   * @param {RTCRtpSender} sender - RTCRtpSender 객체
-   * @param {number} bitrate - 비트레이트 (bps 단위, 예: 32000 = 32kbps)
+   * @param {string} sdp - 원본 SDP 문자열
+   * @returns {string} DTX가 비활성화된 SDP 문자열
    *
    * @description
-   * RTCRtpSender.setParameters()를 사용하여 오디오 비트레이트를 제한합니다.
-   * 이를 통해 네트워크 대역폭 사용을 최적화할 수 있습니다.
+   * DTX가 활성화되면 침묵 구간에서 패킷 전송이 중단되어
+   * 수신측 jitter buffer가 불안정해지고 로봇 소리가 발생할 수 있습니다.
+   * usedtx=0을 설정하여 침묵 구간에서도 comfort noise 패킷을 전송합니다.
    *
    * @example
-   * const sender = this.pc.addTrack(audioTrack, stream);
-   * await this.setAudioBitrate(sender, 32000); // 32kbps로 제한
+   * offer.sdp = this.disableDTX(offer.sdp);
    */
-  async setAudioBitrate(sender, bitrate) {
-    try {
-      const params = sender.getParameters();
+  disableDTX(sdp) {
+    // Opus 코덱의 fmtp 라인을 찾아서 최적화 설정 추가
+    // 로봇 소리 방지를 위한 설정:
+    // - usedtx=0: DTX 비활성화 (침묵 시에도 패킷 전송)
+    // - cbr=1: 고정 비트레이트 (jitter buffer 안정화)
+    // - maxaveragebitrate=32000: 32kbps 고정 (품질 보장)
+    // - ptime=20: 20ms 패킷 크기 (표준)
+    const lines = sdp.split('\r\n');
+    const modifiedLines = lines.map(line => {
+      // Opus fmtp 라인 찾기 (보통 payload type 111)
+      if (line.startsWith('a=fmtp:') && line.includes('minptime')) {
+        // usedtx=0 (DTX 비활성화)
+        if (line.includes('usedtx=')) {
+          line = line.replace(/usedtx=\d/, 'usedtx=0');
+        } else {
+          line += ';usedtx=0';
+        }
 
-      // encodings 배열이 없으면 초기화
-      if (!params.encodings || params.encodings.length === 0) {
-        params.encodings = [{}];
+        // cbr=1 (고정 비트레이트 - jitter 감소)
+        if (!line.includes('cbr=')) {
+          line += ';cbr=1';
+        }
+
+        // maxaveragebitrate (32kbps - 음성에 충분)
+        if (!line.includes('maxaveragebitrate=')) {
+          line += ';maxaveragebitrate=48000';
+        }
+
+        // stereo 설정 (모노)
+        if (!line.includes('stereo=')) {
+          line += ';stereo=0;sprop-stereo=0';
+        }
+
+        console.log('🔧 Opus optimized in SDP:', line);
       }
 
-      // 각 인코딩에 maxBitrate 설정
-      params.encodings.forEach(encoding => {
-        encoding.maxBitrate = bitrate;
-      });
+      // ptime 설정 (20ms 패킷 - 표준적이고 안정적)
+      if (line.startsWith('a=ptime:')) {
+        line = 'a=ptime:20';
+      }
 
-      await sender.setParameters(params);
-      console.log(`🎵 Audio bitrate set to ${bitrate / 1000}kbps`);
-    } catch (error) {
-      console.warn('⚠️ Failed to set audio bitrate:', error.message);
-      // 비트레이트 설정 실패는 치명적이지 않으므로 에러를 던지지 않음
-    }
+      return line;
+    });
+    return modifiedLines.join('\r\n');
   }
 }
