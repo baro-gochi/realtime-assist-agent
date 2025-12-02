@@ -366,14 +366,15 @@ class PeerConnectionManager:
 
             Workflow:
                 1. 오디오 트랙인지 확인
-                2. 원본 트랙 저장 (self.audio_tracks)
-                3. 같은 룸의 다른 피어들에게 트랙 릴레이
+                2. MediaRelay를 통해 트랙 복제 (각 소비자에게 독립적인 스트림 제공)
+                3. STT용 트랙과 릴레이용 트랙을 별도로 생성
                 4. 첫 번째 트랙인 경우 renegotiation 콜백 트리거
                 5. 트랙 종료 이벤트 핸들러 등록
 
             Note:
                 - 피어당 첫 번째 트랙 수신 시에만 renegotiation 트리거
-                - 트랙은 디코딩/인코딩 없이 원본 그대로 전달 (낮은 지연시간)
+                - MediaRelay.subscribe()로 각 소비자에게 독립적인 프레임 스트림 제공
+                - 이렇게 해야 RTP timestamp가 일정하게 유지됨 (jitterBufferDelay 안정화)
                 - 각 트랙에 "ended" 이벤트 핸들러 등록
             """
             logger.info(f"Peer {peer_id} in room '{room_name}' received {track.kind} track")
@@ -392,23 +393,26 @@ class PeerConnectionManager:
                 # Get ElevenLabs STT queue if dual STT is enabled
                 elevenlabs_queue = self.elevenlabs_audio_queues.get(peer_id)
 
-                # Create AudioRelayTrack with STT queues (Google + ElevenLabs if enabled)
-                relay_track = AudioRelayTrack(track, stt_queue, elevenlabs_queue)
+                # CRITICAL FIX: Use MediaRelay.subscribe() to create independent track copies
+                # Without this, multiple consumers (STT + other peers) share the same frame buffer,
+                # causing RTP timestamp discontinuities and jitterBufferDelay to increase continuously.
 
-                # Store relay track (instead of original track)
-                self.audio_tracks[peer_id] = relay_track
+                # 1. Create STT track using relay subscription
+                stt_track_source = self.relay.subscribe(track)
+                stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue, elevenlabs_queue)
 
-                # IMPORTANT: Start consuming this track immediately for STT
-                # Even if no other peers are in the room, we need to consume the track
-                # to get frames for STT processing
-                consumer_task = asyncio.create_task(self._consume_audio_track(peer_id, relay_track))
+                # 2. Store original track for relay to other peers (each will get their own subscription)
+                self.audio_tracks[peer_id] = track
+
+                # 3. Start consuming STT track for speech recognition
+                consumer_task = asyncio.create_task(self._consume_audio_track(peer_id, stt_relay_track))
                 # Store task to prevent it from being garbage collected
                 if peer_id not in self.audio_consumer_tasks:
                     self.audio_consumer_tasks[peer_id] = []
                 self.audio_consumer_tasks[peer_id].append(consumer_task)
 
-                # Add relay track to other peers in same room
-                await self._relay_to_room_peers(peer_id, room_name, relay_track)
+                # 4. Add relay track to other peers in same room (each gets independent subscription)
+                await self._relay_to_room_peers(peer_id, room_name, track)
 
             # Trigger renegotiation ONCE per peer (when first track arrives)
             if trigger_renegotiation and self.on_track_received_callback:
@@ -447,12 +451,14 @@ class PeerConnectionManager:
         Args:
             source_peer_id (str): 미디어를 전송하는 피어의 ID
             room_name (str): 릴레이할 룸 이름
-            track (MediaStreamTrack): 릴레이할 미디어 트랙 (오디오 또는 비디오)
+            track (MediaStreamTrack): 릴레이할 원본 미디어 트랙 (오디오 또는 비디오)
 
         Note:
             - 소스 피어는 제외됨 (본인에게는 전송하지 않음)
             - 같은 룸의 피어만 대상
             - 연결이 닫힌 피어는 제외됨
+            - 각 피어에게 MediaRelay.subscribe()로 독립적인 트랙 복사본 전달
+            - 이렇게 해야 RTP timestamp가 일정하게 유지됨 (jitterBufferDelay 안정화)
             - 각 릴레이 동작은 로그에 기록됨
 
         Examples:
@@ -460,7 +466,7 @@ class PeerConnectionManager:
             >>> await self._relay_to_room_peers(
             ...     source_peer_id="peer-123",
             ...     room_name="상담실1",
-            ...     track=audio_relay_track
+            ...     track=original_audio_track
             ... )
             INFO:__main__:Relaying audio from peer-123 to peer-456 in room '상담실1'
         """
@@ -469,8 +475,11 @@ class PeerConnectionManager:
             if (peer_id != source_peer_id and
                 self.peer_rooms.get(peer_id) == room_name and
                 pc.connectionState != "closed"):
-                pc.addTrack(track)
-                logger.info(f"Relaying {track.kind} from {source_peer_id} to {peer_id} in room '{room_name}'")
+                # CRITICAL: Each peer gets their own subscription via MediaRelay
+                # This ensures independent frame buffers and stable RTP timestamps
+                relayed_track = self.relay.subscribe(track)
+                pc.addTrack(relayed_track)
+                logger.info(f"Relaying {track.kind} from {source_peer_id} to {peer_id} in room '{room_name}' (via MediaRelay)")
 
     async def handle_offer(
         self,
@@ -544,15 +553,18 @@ class PeerConnectionManager:
             )
 
             # NOW add NEW tracks from other peers (skip already added tracks)
+            # CRITICAL: Use MediaRelay.subscribe() for each peer to ensure independent frame buffers
             tracks_added = 0
             for other_peer_id in other_peers_in_room:
                 if other_peer_id != peer_id:
                     # Add audio track if exists and not already added
                     if other_peer_id in self.audio_tracks:
-                        track = self.audio_tracks[other_peer_id]
-                        if track.id not in current_track_ids:
-                            pc.addTrack(track)
-                            logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id}")
+                        original_track = self.audio_tracks[other_peer_id]
+                        if original_track.id not in current_track_ids:
+                            # Each peer gets their own subscription via MediaRelay
+                            relayed_track = self.relay.subscribe(original_track)
+                            pc.addTrack(relayed_track)
+                            logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id} (via MediaRelay)")
                             tracks_added += 1
                         else:
                             logger.info(f"⏭️ Skipped existing audio track from {other_peer_id}")
@@ -582,12 +594,16 @@ class PeerConnectionManager:
         pc = await self.create_peer_connection(peer_id, room_name, other_peers_in_room)
 
         # Add audio tracks from other peers in the room
+        # CRITICAL: Use MediaRelay.subscribe() for each peer to ensure independent frame buffers
         for other_peer_id in other_peers_in_room:
             if other_peer_id != peer_id:
                 # Add audio track if exists
                 if other_peer_id in self.audio_tracks:
-                    pc.addTrack(self.audio_tracks[other_peer_id])
-                    logger.info(f"Added audio track from {other_peer_id} to {peer_id}")
+                    original_track = self.audio_tracks[other_peer_id]
+                    # Each peer gets their own subscription via MediaRelay
+                    relayed_track = self.relay.subscribe(original_track)
+                    pc.addTrack(relayed_track)
+                    logger.info(f"Added audio track from {other_peer_id} to {peer_id} (via MediaRelay)")
 
         # Set remote description (offer)
         await pc.setRemoteDescription(
