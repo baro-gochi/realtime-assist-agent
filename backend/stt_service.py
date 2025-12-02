@@ -131,7 +131,7 @@ class STTService:
 
         self.model = model or os.getenv("STT_MODEL", "short")
         self.sample_rate = TARGET_SAMPLE_RATE
-        self.input_sample_rate = int(os.getenv("STT_SAMPLE_RATE_HERTZ", "32000"))  # WebRTC 입력 샘플레이트 (32kbps 비트레이트에 최적화)
+        self.input_sample_rate = int(os.getenv("STT_SAMPLE_RATE_HERTZ", "48000"))  # WebRTC 입력 샘플레이트 (32kbps 비트레이트에 최적화)
 
         # Location 설정 (리전별 엔드포인트 지원)
         self.location = os.getenv("STT_LOCATION", "global")
