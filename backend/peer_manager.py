@@ -544,13 +544,29 @@ class PeerConnectionManager:
 
             # Get currently added track IDs to avoid duplicates
             current_senders = pc.getSenders()
-            current_track_ids = {sender.track.id for sender in current_senders if sender.track}
+            logger.info(f"🔍 Renegotiation: PC state before - signaling={pc.signalingState}, connection={pc.connectionState}")
+            logger.info(f"🔍 Current senders count: {len(current_senders)}")
+            current_track_ids = set()
+            for sender in current_senders:
+                if sender.track:
+                    track_id = sender.track.id
+                    if track_id is not None:
+                        current_track_ids.add(track_id)
+                        logger.debug(f"   Sender track: {track_id}")
+                    else:
+                        logger.warning(f"   ⚠️ Sender has track with None id")
+                else:
+                    logger.debug(f"   Sender has no track")
             logger.info(f"Current tracks in connection: {len(current_track_ids)}")
 
             # IMPORTANT: Set remote description FIRST before adding tracks
-            await pc.setRemoteDescription(
-                RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
-            )
+            try:
+                await pc.setRemoteDescription(
+                    RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
+                )
+            except Exception as sdp_error:
+                logger.error(f"❌ Failed to set remote description during renegotiation: {sdp_error}")
+                raise
 
             # NOW add NEW tracks from other peers (skip already added tracks)
             tracks_added = 0
@@ -559,12 +575,22 @@ class PeerConnectionManager:
                     # Add audio track if exists and not already added
                     if other_peer_id in self.audio_tracks:
                         original_track = self.audio_tracks[other_peer_id]
+                        # Validate track is still valid before subscribing
+                        if original_track is None:
+                            logger.warning(f"⚠️ Track from {other_peer_id} is None, skipping")
+                            continue
+                        if hasattr(original_track, 'readyState') and original_track.readyState == 'ended':
+                            logger.warning(f"⚠️ Track from {other_peer_id} has ended, skipping")
+                            continue
                         if original_track.id not in current_track_ids:
-                            # MediaRelay.subscribe() for independent frame buffer
-                            relayed_track = self.relay.subscribe(original_track)
-                            pc.addTrack(relayed_track)
-                            logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id}")
-                            tracks_added += 1
+                            try:
+                                # MediaRelay.subscribe() for independent frame buffer
+                                relayed_track = self.relay.subscribe(original_track)
+                                pc.addTrack(relayed_track)
+                                logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id}")
+                                tracks_added += 1
+                            except Exception as track_error:
+                                logger.error(f"❌ Failed to add track from {other_peer_id}: {track_error}")
                         else:
                             logger.info(f"⏭️ Skipped existing audio track from {other_peer_id}")
 
@@ -576,8 +602,13 @@ class PeerConnectionManager:
             logger.info(f"  ✅ [Renego] TURN ready")
 
             # Create answer (includes newly added tracks)
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
+            try:
+                answer = await pc.createAnswer()
+                await pc.setLocalDescription(answer)
+            except Exception as answer_error:
+                logger.error(f"❌ Failed to create/set answer during renegotiation: {answer_error}")
+                logger.error(f"   PC state: signaling={pc.signalingState}, connection={pc.connectionState}")
+                raise
 
             # Log ICE gathering state
             candidate_count = pc.localDescription.sdp.count("a=candidate:")
