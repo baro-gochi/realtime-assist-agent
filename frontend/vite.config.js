@@ -65,7 +65,7 @@ export default defineConfig({
      * npm run dev
      *
      * # 터널 사용 시
-     * VITE_BACKEND_URL=https://my-dev-backend.loca.lt npm run dev
+     * VITE_API_URL=https://my-dev-backend.loca.lt npm run dev
      */
     allowedHosts: [
       "my-dev-webrtc.loca.lt",
@@ -73,13 +73,13 @@ export default defineConfig({
     ],
     proxy: {
       '/ws': {
-        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8000',
         ws: true,
         changeOrigin: true,
         secure: false,  // Allow self-signed certs in development
       },
       '/api': {
-        target: process.env.VITE_BACKEND_URL || 'http://localhost:8000',
+        target: process.env.VITE_API_URL || 'http://localhost:8000',
         changeOrigin: true,
         secure: false,  // Allow self-signed certs in development
       }

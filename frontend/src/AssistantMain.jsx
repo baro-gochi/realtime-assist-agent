@@ -1,18 +1,16 @@
 /**
- * @fileoverview AI 상담 어시스턴트 메인 대시보드 (음성 전용)
+ * @fileoverview AI 상담 어시스턴트 메인 대시보드
  *
  * @description
  * 상담사를 위한 AI 어시스턴트 대시보드 컴포넌트입니다.
  * 실시간 STT, 연결 정보, 대화 내역, AI 추천 답변 등을 표시합니다.
- * 비디오 없이 음성 통화만 지원합니다.
  *
  * 주요 기능:
  * 1. 상담사/고객 역할 선택
  * 2. 상담사: 방 생성, 고객: 방 목록에서 선택
- * 3. 실시간 음성 인식 및 대화 표시 (오디오 전용)
+ * 3. 실시간 음성 인식 및 대화 표시
  * 4. 연결된 상대방 정보 표시
- * 5. AI 실시간 요약 (JSON 형식)
- * 6. AI 추천 답변 (RAG 기반) - 구현 예정
+ * 5. AI 추천 답변 (RAG 기반)
  */
 
 import { useState, useEffect, useRef } from 'react';
@@ -56,6 +54,7 @@ function AssistantMain() {
 
   // WebRTC ref
   const webrtcClientRef = useRef(null);
+  const remoteAudioRef = useRef(null);
 
   // 폼 입력값
   const [roomInput, setRoomInput] = useState('');
@@ -64,12 +63,17 @@ function AssistantMain() {
   // 오디오 상태
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
 
+  // Web Audio API (볼륨 증폭용)
+  const audioContextRef = useRef(null);
+  const gainNodeRef = useRef(null);
+
   /**
    * WebRTC 클라이언트 초기화
    */
   useEffect(() => {
-    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
+    // 환경변수 우선, 없으면 현재 호스트 기반 URL 사용
+    const wsUrl = import.meta.env.VITE_WS_URL ||
+      `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
     console.log('🔗 WebSocket URL:', wsUrl);
     const client = new WebRTCClient(wsUrl);
@@ -104,6 +108,53 @@ function AssistantMain() {
       setParticipants(prev =>
         prev.filter(p => p.peer_id !== data.peer_id)
       );
+    };
+
+    client.onRemoteStream = (stream) => {
+      console.log('🎤 Remote audio stream received');
+
+      // Web Audio API를 사용하여 볼륨 증폭
+      try {
+        // 기존 AudioContext 정리
+        if (audioContextRef.current) {
+          audioContextRef.current.close().catch(() => {});
+        }
+
+        // 새 AudioContext 생성
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          latencyHint: 'interactive',  // 낮은 지연 모드
+          sampleRate: 48000            // 48kHz 샘플레이트
+        });
+        audioContextRef.current = audioContext;
+
+        // 스트림을 AudioContext에 연결
+        const source = audioContext.createMediaStreamSource(stream);
+
+        // GainNode로 볼륨 증폭 (2.5배)
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 2.5;
+        gainNodeRef.current = gainNode;
+
+        // 연결: source → gain → destination (스피커)
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        console.log('🔊 Audio amplified with gain:', gainNode.gain.value);
+
+        // 숨겨진 audio 요소에도 연결 (폴백용)
+        if (remoteAudioRef.current) {
+          remoteAudioRef.current.srcObject = stream;
+          remoteAudioRef.current.volume = 0; // Web Audio API 사용하므로 0으로
+        }
+      } catch (err) {
+        console.error('❌ Web Audio API failed, using fallback:', err);
+        // 폴백: 일반 audio 요소 사용
+        if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== stream) {
+          remoteAudioRef.current.srcObject = stream;
+          remoteAudioRef.current.volume = 1.0;
+          remoteAudioRef.current.play().catch(e => console.error('Remote audio play failed:', e));
+        }
+      }
     };
 
     client.onConnectionStateChange = (state) => {
@@ -276,18 +327,20 @@ function AssistantMain() {
    * 방 목록 가져오기 (고객용)
    */
   const fetchRooms = async () => {
-    // 백엔드 URL 결정: localtunnel 사용 시 환경변수, 아니면 상대 경로
-    const backendUrl = import.meta.env.VITE_BACKEND_URL || '';
-    const apiUrl = backendUrl ? `${backendUrl}/api/rooms` : '/api/rooms';
+    // 환경변수 우선, 없으면 현재 호스트 사용
+    const apiBase = import.meta.env.VITE_API_URL || '';
+    const apiUrl = `${apiBase}/api/rooms`;
 
     console.log('🔄 Fetching rooms from:', apiUrl);
     setLoadingRooms(true);
     setError(''); // 이전 에러 초기화
     try {
-      // localtunnel bypass 헤더 추가
-      const headers = {};
-      if (backendUrl && backendUrl.includes('loca.lt')) {
-        headers['Bypass-Tunnel-Reminder'] = 'go';
+      const headers = {
+        'bypass-tunnel-reminder': 'true',
+      };
+      const authToken = sessionStorage.getItem('auth_token');
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
       }
 
       const response = await fetch(apiUrl, { headers });
@@ -376,6 +429,15 @@ function AssistantMain() {
    */
   const handleLeaveRoom = () => {
     webrtcClientRef.current.leaveRoom();
+
+    // AudioContext 정리
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+
     setIsInRoom(false);
     setIsCallActive(false);
     setCurrentRoom('');
@@ -698,6 +760,7 @@ function AssistantMain() {
                   </div>
                 </div>
               )}
+              {llmStatus === 'connected' && !parsedSummary && <p className="summary-text">요약 수신 대기 중...</p>}
               {llmStatus === 'failed' && <p className="summary-text error">❌ LLM 연결 실패: 요약 기능을 사용할 수 없습니다. (STT는 정상 동작)</p>}
             </div>
           </div>
@@ -765,6 +828,9 @@ function AssistantMain() {
           </aside>
         )}
       </main>
+
+      {/* Hidden Audio Element for Remote Stream */}
+      <audio ref={remoteAudioRef} autoPlay />
     </div>
   );
 }

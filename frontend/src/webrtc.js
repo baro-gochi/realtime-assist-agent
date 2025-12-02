@@ -133,7 +133,9 @@ export class WebRTCClient {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-      const headers = {};
+      const headers = {
+        'bypass-tunnel-reminder': 'true',
+      };
       if (this.authToken) {
         headers['Authorization'] = `Bearer ${this.authToken}`;
       }
@@ -547,16 +549,16 @@ export class WebRTCClient {
       // 오디오 재생 지연 버퍼 설정 (패킷 손실/지터로 인한 끊김 방지)
       if (event.receiver && event.track.kind === 'audio') {
         // jitter buffer 설정 증가 (로봇 소리 방지)
-        // 150ms 버퍼로 네트워크 지터 흡수
-        event.receiver.playoutDelayHint = 0.15; // 150ms 재생 지연
+        // 50ms 버퍼로 네트워크 지터 흡수
+        event.receiver.playoutDelayHint = 0.05; // 50ms 재생 지연
 
         // jitterBufferTarget 설정 (지원하는 브라우저에서)
         if ('jitterBufferTarget' in event.receiver) {
-          event.receiver.jitterBufferTarget = 150; // 150ms 타겟
-          console.log('🔊 Jitter buffer target set to 150ms');
+          event.receiver.jitterBufferTarget = 50; // 50ms 타겟
+          console.log('🔊 Jitter buffer target set to 50ms');
         }
 
-        console.log('🔊 Audio playout delay hint set to 150ms');
+        console.log('🔊 Audio playout delay hint set to 50ms');
       }
 
       // Add only the received track (not all tracks from stream)
@@ -677,10 +679,16 @@ export class WebRTCClient {
       // Only set remote description if we're in the correct state
       // We should be in 'have-local-offer' state to receive an answer
       if (this.pc.signalingState === 'have-local-offer') {
+        // Answer SDP에도 동일한 Opus 설정 적용 (bitrate 등)
+        const modifiedAnswer = {
+          type: answer.type,
+          sdp: this.disableDTX(answer.sdp)
+        };
+
         await this.pc.setRemoteDescription(
-          new RTCSessionDescription(answer)
+          new RTCSessionDescription(modifiedAnswer)
         );
-        console.log('✅ Remote description set, state:', this.pc.signalingState);
+        console.log('✅ Remote description set (with Opus optimization), state:', this.pc.signalingState);
 
         // NOW process buffered ICE candidates (remote description is set)
         if (this.pendingCandidates && this.pendingCandidates.length > 0) {
@@ -1061,6 +1069,49 @@ export class WebRTCClient {
   }
 
   /**
+   * 오디오 송신 bitrate를 직접 설정합니다
+   *
+   * @async
+   * @param {number} bitrate - 목표 bitrate (bps)
+   *
+   * @description
+   * RTCRtpSender.setParameters()를 사용하여 인코더 bitrate를 직접 제어합니다.
+   * SDP의 maxaveragebitrate는 수신측에 대한 힌트일 뿐이고,
+   * 실제 송신 bitrate는 이 방법으로 설정해야 합니다.
+   */
+  async setAudioBitrate(bitrate) {
+    if (!this.pc) {
+      console.warn('⚠️ PeerConnection not available for bitrate setting');
+      return;
+    }
+
+    const senders = this.pc.getSenders();
+    const audioSender = senders.find(s => s.track?.kind === 'audio');
+
+    if (!audioSender) {
+      console.warn('⚠️ No audio sender found for bitrate setting');
+      return;
+    }
+
+    try {
+      const params = audioSender.getParameters();
+
+      // encodings 배열이 없으면 생성
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+
+      // maxBitrate 설정 (bps 단위)
+      params.encodings[0].maxBitrate = bitrate;
+
+      await audioSender.setParameters(params);
+      console.log(`🎵 Audio bitrate set to ${bitrate}bps via RTCRtpSender`);
+    } catch (error) {
+      console.error('❌ Failed to set audio bitrate:', error);
+    }
+  }
+
+  /**
    * SDP에서 Opus DTX(Discontinuous Transmission)를 비활성화합니다
    *
    * @param {string} sdp - 원본 SDP 문자열
@@ -1079,7 +1130,7 @@ export class WebRTCClient {
     // 로봇 소리 방지를 위한 설정:
     // - usedtx=0: DTX 비활성화 (침묵 시에도 패킷 전송)
     // - cbr=1: 고정 비트레이트 (jitter buffer 안정화)
-    // - maxaveragebitrate=32000: 32kbps 고정 (품질 보장)
+    // - maxaveragebitrate=48000: 48kbps 고정 (품질 보장)
     // - ptime=20: 20ms 패킷 크기 (표준)
     const lines = sdp.split('\r\n');
     const modifiedLines = lines.map(line => {
@@ -1097,8 +1148,10 @@ export class WebRTCClient {
           line += ';cbr=1';
         }
 
-        // maxaveragebitrate (32kbps - 음성에 충분)
-        if (!line.includes('maxaveragebitrate=')) {
+        // maxaveragebitrate (48kbps - 음성 품질 향상)
+        if (line.includes('maxaveragebitrate=')) {
+          line = line.replace(/maxaveragebitrate=\d+/, 'maxaveragebitrate=48000');
+        } else {
           line += ';maxaveragebitrate=48000';
         }
 
