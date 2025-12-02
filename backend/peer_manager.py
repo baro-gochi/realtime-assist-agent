@@ -189,12 +189,22 @@ class PacedRelayTrack(MediaStreamTrack):
 
         Note:
             - 첫 호출 시 소스 소비 태스크 시작
+            - 첫 프레임 도착까지 대기 (초기 버퍼링)
             - monotonic clock 기반으로 정확한 타이밍 유지
             - timestamp는 항상 960씩 정확히 증가
         """
         # 소스 소비 태스크 시작 (최초 1회)
         if self._consumer_task is None:
             self._consumer_task = asyncio.create_task(self._consume_source())
+            # 첫 프레임이 버퍼에 도착할 때까지 대기 (최대 2초)
+            logger.info("🎵 PacedRelayTrack: Waiting for first frame from source...")
+            for _ in range(100):  # 100 * 20ms = 2초
+                if not self._buffer.empty():
+                    logger.info("🎵 PacedRelayTrack: Initial buffer ready, starting pacing")
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                logger.warning("⚠️ PacedRelayTrack: Timeout waiting for first frame, starting anyway")
 
         # 시작 시간 설정 (최초 1회)
         if self._start_time is None:
