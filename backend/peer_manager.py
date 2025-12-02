@@ -559,7 +559,13 @@ class PeerConnectionManager:
                     logger.debug(f"   Sender has no track")
             logger.info(f"Current tracks in connection: {len(current_track_ids)}")
 
-            # IMPORTANT: Set remote description FIRST before adding tracks
+            # CRITICAL FIX: Do NOT add tracks during renegotiation!
+            # Adding tracks after setRemoteDescription causes "None is not in list" error
+            # in aiortc's createAnswer() because the transceiver matching fails.
+            # Tracks from other peers will be relayed through the on("track") handler
+            # when their media arrives.
+
+            # Set remote description first
             try:
                 await pc.setRemoteDescription(
                     RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
@@ -568,43 +574,33 @@ class PeerConnectionManager:
                 logger.error(f"❌ Failed to set remote description during renegotiation: {sdp_error}")
                 raise
 
-            # NOW add NEW tracks from other peers (skip already added tracks)
-            tracks_added = 0
-            for other_peer_id in other_peers_in_room:
-                if other_peer_id != peer_id:
-                    # Add audio track if exists and not already added
-                    if other_peer_id in self.audio_tracks:
-                        original_track = self.audio_tracks[other_peer_id]
-                        # Validate track is still valid before subscribing
-                        if original_track is None:
-                            logger.warning(f"⚠️ Track from {other_peer_id} is None, skipping")
-                            continue
-                        if hasattr(original_track, 'readyState') and original_track.readyState == 'ended':
-                            logger.warning(f"⚠️ Track from {other_peer_id} has ended, skipping")
-                            continue
-                        if original_track.id not in current_track_ids:
-                            try:
-                                # MediaRelay.subscribe() for independent frame buffer
-                                relayed_track = self.relay.subscribe(original_track)
-                                pc.addTrack(relayed_track)
-                                logger.info(f"🔄 Added NEW audio track from {other_peer_id} to {peer_id}")
-                                tracks_added += 1
-                            except Exception as track_error:
-                                logger.error(f"❌ Failed to add track from {other_peer_id}: {track_error}")
-                        else:
-                            logger.info(f"⏭️ Skipped existing audio track from {other_peer_id}")
+            logger.info(f"🔍 After setRemoteDescription: signaling={pc.signalingState}")
 
-            logger.info(f"Total new tracks added: {tracks_added}")
+            # If state is already stable, setRemoteDescription handled the offer internally
+            # This can happen when aiortc determines no actual changes are needed
+            if pc.signalingState == "stable":
+                logger.info(f"⚡ Signaling already stable - no answer needed, returning current local description")
+                # Return the existing local description (already has answer set)
+                if pc.localDescription:
+                    return {
+                        "sdp": pc.localDescription.sdp,
+                        "type": "answer"
+                    }
+                else:
+                    # Edge case: no local description, need to create one
+                    logger.warning("⚠️ No local description in stable state, cannot create answer")
+                    raise ValueError("Cannot create answer: signaling state is stable but no local description")
 
-            # Wait for TURN BEFORE creating answer
-            logger.info(f"  ⏳ [Renego] Waiting {MAX_WAIT}s for TURN...")
-            await asyncio.sleep(MAX_WAIT)
-            logger.info(f"  ✅ [Renego] TURN ready")
+            # CRITICAL: Create answer IMMEDIATELY - do not wait!
+            # The signaling state can change during async waits, causing "None is not in list" errors
+            # ICE gathering will happen asynchronously after answer is created
+            logger.info(f"📝 Creating answer immediately (signaling={pc.signalingState})")
 
             # Create answer (includes newly added tracks)
             try:
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
+                logger.info(f"✅ Answer created and local description set")
             except Exception as answer_error:
                 logger.error(f"❌ Failed to create/set answer during renegotiation: {answer_error}")
                 logger.error(f"   PC state: signaling={pc.signalingState}, connection={pc.connectionState}")
