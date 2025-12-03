@@ -47,6 +47,15 @@ import numpy as np
 import queue
 import threading
 
+# Adaptation 모듈 (선택적)
+try:
+    from stt_adaptation import get_default_adaptation, STTAdaptationConfig
+    ADAPTATION_AVAILABLE = True
+except ImportError:
+    ADAPTATION_AVAILABLE = False
+    get_default_adaptation = None
+    STTAdaptationConfig = None
+
 logger = logging.getLogger(__name__)
 
 # Google STT 최적화 상수
@@ -68,18 +77,24 @@ class STTService:
         model (str): 사용할 음성 인식 모델
         enable_automatic_punctuation (bool): 자동 구두점 추가 여부
         enable_interim_results (bool): 중간 결과 활성화 여부
+        enable_adaptation (bool): 음성 적응(PhraseSet/CustomClass) 활성화 여부
+        adaptation (SpeechAdaptation): 음성 적응 설정 객체
 
     Note:
         - GOOGLE_APPLICATION_CREDENTIALS 환경 변수 필수
         - GOOGLE_CLOUD_PROJECT 환경 변수 필수 (프로젝트 ID)
         - WebRTC 오디오는 자동으로 인코딩 감지됨
         - 25KB 스트림 제한 주의
+        - adaptation 설정: backend/stt_phrases.yaml 파일 또는 STT_ADAPTATION_CONFIG 환경 변수
 
     Examples:
         >>> service = STTService()
         >>> # 오디오 스트림 처리
         >>> async for transcript in service.process_audio_stream(audio_queue):
         ...     print(f"인식 결과: {transcript}")
+
+    See Also:
+        stt_adaptation.py: PhraseSet/CustomClass 설정 모듈
     """
 
     def __init__(
@@ -89,6 +104,7 @@ class STTService:
         model: Optional[str] = None,
         enable_automatic_punctuation: Optional[bool] = None,
         enable_interim_results: Optional[bool] = None,
+        enable_adaptation: Optional[bool] = None,
     ):
         """STTService 초기화.
 
@@ -103,6 +119,9 @@ class STTService:
                 환경 변수 STT_ENABLE_AUTOMATIC_PUNCTUATION 또는 True 사용
             enable_interim_results (bool, optional): 중간 결과 활성화.
                 환경 변수 STT_ENABLE_INTERIM_RESULTS 또는 False 사용
+            enable_adaptation (bool, optional): 음성 적응(PhraseSet/CustomClass) 활성화.
+                환경 변수 STT_ENABLE_ADAPTATION 또는 True 사용.
+                stt_phrases.yaml 파일이 있으면 자동 로드.
 
         Raises:
             ValueError: GOOGLE_CLOUD_PROJECT 미설정 시
@@ -111,6 +130,7 @@ class STTService:
             - .env 파일에서 환경 변수 로드 필요
             - 서비스 계정 키 파일 권한 확인 필요
             - v2 API는 Recognizer 개념 필수
+            - adaptation 설정은 backend/stt_phrases.yaml 파일 참조
         """
         # Google Cloud 인증 및 프로젝트 확인 프로젝트 ID (v2에서 필수)
         if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
@@ -162,6 +182,21 @@ class STTService:
             else os.getenv("STT_ENABLE_INTERIM_RESULTS", "true").lower() == "true"
         )
 
+        # Adaptation (PhraseSet/CustomClass) 설정
+        self.enable_adaptation = (
+            enable_adaptation
+            if enable_adaptation is not None
+            else os.getenv("STT_ENABLE_ADAPTATION", "true").lower() == "true"
+        )
+        self.adaptation = None
+        if self.enable_adaptation and ADAPTATION_AVAILABLE:
+            try:
+                self.adaptation = get_default_adaptation()
+                if self.adaptation:
+                    logger.info("🎯 STT adaptation loaded from config")
+            except Exception as e:
+                logger.warning(f"Failed to load STT adaptation: {e}")
+
         logger.info(
             f"STT Service v2 initialized: "
             f"project={self.project_id}, "
@@ -170,7 +205,8 @@ class STTService:
             f"model={self.model}, "
             f"sample_rate={self.sample_rate}Hz, "
             f"punctuation={self.enable_automatic_punctuation}, "
-            f"interim={self.enable_interim_results}"
+            f"interim={self.enable_interim_results}, "
+            f"adaptation={'enabled' if self.adaptation else 'disabled'}"
         )
 
     def _resample_audio(self, audio_array: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
@@ -226,6 +262,10 @@ class STTService:
             recognition_config.features = cloud_speech.RecognitionFeatures(
                 enable_automatic_punctuation=True
             )
+
+        # Adaptation 설정 (PhraseSet/CustomClass)
+        if self.adaptation:
+            recognition_config.adaptation = self.adaptation
 
         # StreamingRecognitionConfig 생성
         streaming_config = cloud_speech.StreamingRecognitionConfig(

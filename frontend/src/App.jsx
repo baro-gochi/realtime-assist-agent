@@ -38,6 +38,7 @@ function PasswordScreen({ onAuthenticated }) {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'bypass-tunnel-reminder': 'true',
+          'ngrok-skip-browser-warning': 'true',
         },
         body: `password=${encodeURIComponent(password)}`,
       });
@@ -138,6 +139,7 @@ function App() {
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'bypass-tunnel-reminder': 'true',
+          'ngrok-skip-browser-warning': 'true',
         },
         body: `password=${encodeURIComponent(savedToken)}`,
       })

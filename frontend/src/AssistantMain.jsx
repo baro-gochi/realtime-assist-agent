@@ -337,6 +337,7 @@ function AssistantMain() {
     try {
       const headers = {
         'bypass-tunnel-reminder': 'true',
+        'ngrok-skip-browser-warning': 'true',
       };
       const authToken = sessionStorage.getItem('auth_token');
       if (authToken) {

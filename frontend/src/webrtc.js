@@ -135,6 +135,7 @@ export class WebRTCClient {
 
       const headers = {
         'bypass-tunnel-reminder': 'true',
+        'ngrok-skip-browser-warning': 'true',
       };
       if (this.authToken) {
         headers['Authorization'] = `Bearer ${this.authToken}`;

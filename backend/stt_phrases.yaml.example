@@ -1,0 +1,124 @@
+# Google Cloud Speech-to-Text v2 Adaptation 설정
+#
+# 이 파일을 stt_phrases.yaml로 복사하여 사용하세요.
+# 또는 환경 변수 STT_ADAPTATION_CONFIG로 경로를 지정할 수 있습니다.
+#
+# 참고: https://cloud.google.com/speech-to-text/docs/adaptation-model
+
+# 기능 활성화 여부
+enabled: true
+
+# ===== 기본 구문 목록 =====
+# boost 없이 문자열만 또는 {value, boost} 형태로 지정
+# boost 범위: 0 초과 ~ 20 이하 (높을수록 인식 확률 증가)
+phrases:
+  # === 인사/마무리 ===
+  - value: 안녕하세요
+    boost: 5
+  - value: 감사합니다
+    boost: 5
+  - value: 죄송합니다
+    boost: 5
+
+  # === 주문/결제 관련 ===
+  - value: 주문 취소
+    boost: 12
+  - value: 결제 취소
+    boost: 12
+  - value: 환불 요청
+    boost: 12
+  - value: 카드 결제
+    boost: 10
+  - value: 무통장 입금
+    boost: 10
+
+  # === 배송 관련 ===
+  - value: 배송 조회
+    boost: 12
+  - value: 배송 지연
+    boost: 10
+  - value: 반품 접수
+    boost: 12
+  - value: 교환 신청
+    boost: 12
+
+  # === 상담 관련 ===
+  - value: 고객 상담
+    boost: 10
+  - value: 상담원 연결
+    boost: 12
+  - value: AS 접수
+    boost: 12
+
+
+# ===== 구문 집합 (그룹화) =====
+# 관련된 구문들을 그룹으로 묶어 관리
+phrase_sets:
+  # 자주 혼동되는 단어 구분
+  - name: confusing_words
+    boost: 8
+    display_name: 혼동 단어
+    phrases:
+      - value: 배송료
+        boost: 10
+      - value: 배송비
+        boost: 10
+
+  # 숫자 관련
+  - name: numbers
+    boost: 5
+    phrases:
+      - 일
+      - 이
+      - 삼
+      - 사
+      - 오
+
+
+# ===== 커스텀 클래스 =====
+# 관련 항목들의 그룹 (상품명, 브랜드명 등)
+# PhraseSet에서 ${클래스명} 형태로 참조
+custom_classes:
+  # 상품명 목록
+  - name: products
+    display_name: 상품 목록
+    items:
+      - 아이폰 15
+      - 아이폰 14
+      - 갤럭시 S24
+      - 갤럭시 S23
+      - 픽셀 8
+
+  # 브랜드명 목록
+  - name: brands
+    display_name: 브랜드
+    items:
+      - 삼성
+      - 애플
+      - LG
+      - 구글
+
+  # 서비스명
+  - name: services
+    display_name: 서비스
+    items:
+      - 프리미엄 보증
+      - 무상 수리
+      - 유상 수리
+
+
+# ===== 사용 팁 =====
+#
+# 1. Boost 값 설정
+#    - 5-8: 일반적인 도메인 용어
+#    - 10-12: 핵심 명령어/키워드
+#    - 15-20: 매우 중요하거나 자주 오인되는 단어
+#
+# 2. CustomClass 활용
+#    phrases에서 ${클래스명} 형태로 참조:
+#    - value: "${products} 주문"
+#      boost: 15
+#
+# 3. 테스트 방법
+#    boost 값을 조정하면서 인식률 확인
+#    너무 높으면 거짓 양성(false positive) 증가
