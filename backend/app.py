@@ -366,7 +366,7 @@ async def rag_assist_proxy(
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{RAG_SERVER_URL}/assist",
+                f"{RAG_SERVER_URL}/consultation/assist",
                 json=request.model_dump(exclude_none=True)
             )
             response.raise_for_status()
