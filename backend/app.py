@@ -61,7 +61,8 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Depends, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict, Any
+import httpx
 
 from peer_manager import PeerConnectionManager
 from room_manager import RoomManager
@@ -327,6 +328,100 @@ async def get_turn_credentials(_: bool = Depends(verify_auth_header)):
 
     logger.info("✅ AWS coturn credentials provided to frontend")
     return ice_servers
+
+
+# RAG 서버 URL (환경변수로 설정 가능)
+RAG_SERVER_URL = os.getenv("RAG_SERVER_URL", "http://localhost:8001")
+
+
+class RAGAssistRequest(BaseModel):
+    """RAG 어시스턴트 요청 모델."""
+    query: str
+    context: Optional[str] = None
+    conversation_history: Optional[list] = None
+
+
+@app.post("/api/rag/assist")
+async def rag_assist_proxy(
+    request: RAGAssistRequest,
+    _: bool = Depends(verify_auth_header)
+):
+    """RAG 서버로 요청을 프록시합니다.
+
+    8001번 포트의 RAG 서버로 요청을 전달하고 응답을 반환합니다.
+    이를 통해 프론트엔드는 8000번 포트만 사용하면 됩니다.
+
+    Args:
+        request: RAG 어시스턴트 요청 (query, context, conversation_history)
+
+    Returns:
+        dict: RAG 서버의 응답
+
+    Raises:
+        HTTPException: RAG 서버 연결 실패 또는 오류 시
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{RAG_SERVER_URL}/assist",
+                json=request.model_dump(exclude_none=True)
+            )
+            response.raise_for_status()
+            return response.json()
+    except httpx.ConnectError:
+        logger.error(f"❌ RAG 서버 연결 실패: {RAG_SERVER_URL}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"RAG 서버에 연결할 수 없습니다. ({RAG_SERVER_URL})"
+        )
+    except httpx.TimeoutException:
+        logger.error(f"❌ RAG 서버 타임아웃: {RAG_SERVER_URL}")
+        raise HTTPException(
+            status_code=504,
+            detail="RAG 서버 응답 시간 초과"
+        )
+    except httpx.HTTPStatusError as e:
+        logger.error(f"❌ RAG 서버 오류: {e.response.status_code}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"RAG 서버 오류: {e.response.text}"
+        )
+    except Exception as e:
+        logger.error(f"❌ RAG 프록시 오류: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"RAG 프록시 처리 중 오류: {str(e)}"
+        )
+
+
+@app.get("/api/rag/health")
+async def rag_health_check():
+    """RAG 서버 상태를 확인합니다.
+
+    Returns:
+        dict: RAG 서버 상태 정보
+    """
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{RAG_SERVER_URL}/health")
+            if response.status_code == 200:
+                return {
+                    "status": "ok",
+                    "rag_server": RAG_SERVER_URL,
+                    "rag_status": response.json()
+                }
+            else:
+                return {
+                    "status": "error",
+                    "rag_server": RAG_SERVER_URL,
+                    "message": f"RAG 서버 응답 코드: {response.status_code}"
+                }
+    except Exception as e:
+        return {
+            "status": "disconnected",
+            "rag_server": RAG_SERVER_URL,
+            "message": str(e)
+        }
 
 
 @app.websocket("/ws")
