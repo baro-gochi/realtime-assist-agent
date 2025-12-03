@@ -336,9 +336,9 @@ RAG_SERVER_URL = os.getenv("RAG_SERVER_URL", "http://localhost:8001")
 
 class RAGAssistRequest(BaseModel):
     """RAG 어시스턴트 요청 모델."""
-    query: str
-    context: Optional[str] = None
-    conversation_history: Optional[list] = None
+    summary: str
+    include_documents: bool = True
+    max_documents: int = 5
 
 
 @app.post("/api/rag/assist")
@@ -352,7 +352,10 @@ async def rag_assist_proxy(
     이를 통해 프론트엔드는 8000번 포트만 사용하면 됩니다.
 
     Args:
-        request: RAG 어시스턴트 요청 (query, context, conversation_history)
+        request: RAG 어시스턴트 요청
+            - summary: 상담 내용 요약
+            - include_documents: 관련 문서 포함 여부 (기본값: true)
+            - max_documents: 최대 문서 수 (기본값: 5)
 
     Returns:
         dict: RAG 서버의 응답
