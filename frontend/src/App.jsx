@@ -8,13 +8,11 @@
  *
  * 라우트:
  * - / : AssistantMain (AI 상담 어시스턴트 대시보드 - 음성 전용)
- * - /stt-compare : STTComparison (Google STT vs ElevenLabs STT 비교)
  */
 
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import AssistantMain from './AssistantMain';
-import STTComparison from './STTComparison';
 import './App.css';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -184,9 +182,6 @@ function App() {
         {/* Main Route: AI Assistant Dashboard (음성 전용) */}
         <Route path="/" element={<AssistantMain />} />
 
-        {/* STT Comparison Route: Google vs ElevenLabs */}
-        <Route path="/stt-compare" element={<STTComparison />} />
-
         {/* 404 Not Found */}
         <Route path="*" element={
           <div style={{
@@ -199,26 +194,16 @@ function App() {
           }}>
             <h1>404 - Page Not Found</h1>
             <p>요청하신 페이지를 찾을 수 없습니다.</p>
-            <div style={{ marginTop: '20px', display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'center' }}>
-              <Link to="/" style={{
-                padding: '10px 20px',
-                background: '#4F46E5',
-                color: 'white',
-                textDecoration: 'none',
-                borderRadius: '5px'
-              }}>
-                AI 어시스턴트 대시보드
-              </Link>
-              <Link to="/stt-compare" style={{
-                padding: '10px 20px',
-                background: '#10B981',
-                color: 'white',
-                textDecoration: 'none',
-                borderRadius: '5px'
-              }}>
-                STT 엔진 비교
-              </Link>
-            </div>
+            <Link to="/" style={{
+              marginTop: '20px',
+              padding: '10px 20px',
+              background: '#4F46E5',
+              color: 'white',
+              textDecoration: 'none',
+              borderRadius: '5px'
+            }}>
+              AI 어시스턴트 대시보드
+            </Link>
           </div>
         } />
       </Routes>

@@ -51,13 +51,11 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
 from aiortc.rtcicetransport import RTCIceCandidate
 from stt_service import STTService
-from elevenlabs_stt_service import ElevenLabsSTTService
 
 logger = logging.getLogger(__name__)
 
 # STT 엔진 설정
 STT_ENGINE_GOOGLE = "google"
-STT_ENGINE_ELEVENLABS = "elevenlabs"
 MAX_WAIT = 5.0
 
 
@@ -65,45 +63,39 @@ class AudioRelayTrack(MediaStreamTrack):
     """오디오 프레임을 릴레이하고 STT 처리를 위해 캡처하는 트랙.
 
     다른 참가자에게 오디오를 전달하면서 동시에 음성 인식 처리를 위한
-    프레임을 STT 큐에 전달합니다. 듀얼 STT 모드에서는 두 개의 큐에 동시 전송.
+    프레임을 STT 큐에 전달합니다.
 
     Attributes:
         kind (str): 트랙 종류 ("audio")
         track (MediaStreamTrack): 원본 오디오 트랙
-        stt_queue (Optional[asyncio.Queue]): Google STT 처리를 위한 오디오 프레임 큐
-        elevenlabs_queue (Optional[asyncio.Queue]): ElevenLabs STT 처리를 위한 큐
+        stt_queue (Optional[asyncio.Queue]): STT 처리를 위한 오디오 프레임 큐
 
     Note:
         - 큐가 가득 차면 새 프레임은 버려짐 (오버플로우 방지)
-        - stt_queue가 None이면 Google STT 처리 건너뜀
-        - elevenlabs_queue가 None이면 ElevenLabs STT 처리 건너뜀
+        - stt_queue가 None이면 STT 처리 건너뜀
 
     Examples:
         >>> original_track = ... # 원본 오디오 트랙
-        >>> google_queue = asyncio.Queue(maxsize=100)
-        >>> elevenlabs_queue = asyncio.Queue(maxsize=100)
-        >>> relay_track = AudioRelayTrack(original_track, google_queue, elevenlabs_queue)
-        >>> frame = await relay_track.recv()  # 프레임 수신, 양쪽 STT 큐 전달, 릴레이
+        >>> stt_queue = asyncio.Queue(maxsize=100)
+        >>> relay_track = AudioRelayTrack(original_track, stt_queue)
+        >>> frame = await relay_track.recv()  # 프레임 수신, STT 큐 전달, 릴레이
     """
     kind = "audio"
 
     def __init__(
         self,
         track: MediaStreamTrack,
-        stt_queue: Optional[asyncio.Queue] = None,
-        elevenlabs_queue: Optional[asyncio.Queue] = None
+        stt_queue: Optional[asyncio.Queue] = None
     ):
         """AudioRelayTrack 초기화.
 
         Args:
             track (MediaStreamTrack): 릴레이할 원본 오디오 트랙
-            stt_queue (Optional[asyncio.Queue]): Google STT 처리용 큐 (None이면 비활성화)
-            elevenlabs_queue (Optional[asyncio.Queue]): ElevenLabs STT 처리용 큐 (None이면 비활성화)
+            stt_queue (Optional[asyncio.Queue]): STT 처리용 큐 (None이면 비활성화)
         """
         super().__init__()
         self.track = track
         self.stt_queue = stt_queue
-        self.elevenlabs_queue = elevenlabs_queue
 
     async def recv(self):
         """오디오 프레임을 수신하고 릴레이합니다.
@@ -120,30 +112,18 @@ class AudioRelayTrack(MediaStreamTrack):
         """
         frame = await self.track.recv()
 
-        # Send frame to Google STT queue if available
+        # Send frame to STT queue if available
         if self.stt_queue:
             try:
                 # Debug: Log first frame
                 if not hasattr(self, '_first_frame_logged'):
-                    logger.info("🎤 AudioRelayTrack: First frame sent to Google STT queue!")
+                    logger.info("🎤 AudioRelayTrack: First frame sent to STT queue!")
                     self._first_frame_logged = True
 
                 self.stt_queue.put_nowait(frame)
             except asyncio.QueueFull:
                 # Skip frame if queue is full
-                logger.warning("⚠️ Google STT queue full, dropping audio frame")
-                pass
-
-        # Send frame to ElevenLabs STT queue if available
-        if self.elevenlabs_queue:
-            try:
-                if not hasattr(self, '_first_elevenlabs_frame_logged'):
-                    logger.info("🎤 AudioRelayTrack: First frame sent to ElevenLabs STT queue!")
-                    self._first_elevenlabs_frame_logged = True
-
-                self.elevenlabs_queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                logger.warning("⚠️ ElevenLabs STT queue full, dropping audio frame")
+                logger.warning("⚠️ STT queue full, dropping audio frame")
                 pass
 
         return frame
@@ -218,17 +198,11 @@ class PeerConnectionManager:
         self.stt_services: Dict[str, STTService] = {}
         self.on_transcript_callback: Optional[Callable[[str, str, str, str], None]] = None  # peer_id, room, text, source
 
-        # Audio processing queues for Google STT (peer_id -> Queue)
+        # Audio processing queues for STT (peer_id -> Queue)
         self.audio_queues: Dict[str, asyncio.Queue] = {}
 
         # STT processing tasks (peer_id -> Task)
         self.stt_tasks: Dict[str, asyncio.Task] = {}
-
-        # ElevenLabs STT 관련 속성
-        self.elevenlabs_stt_services: Dict[str, ElevenLabsSTTService] = {}
-        self.elevenlabs_audio_queues: Dict[str, asyncio.Queue] = {}
-        self.elevenlabs_stt_tasks: Dict[str, asyncio.Task] = {}
-        self.dual_stt_enabled: Dict[str, bool] = {}  # peer_id -> dual STT 활성화 여부
 
         # Audio consumer tasks to prevent garbage collection (peer_id -> List[Task])
         self.audio_consumer_tasks: Dict[str, List[asyncio.Task]] = {}
@@ -391,16 +365,13 @@ class PeerConnectionManager:
                 # Get STT queue for this peer
                 stt_queue = self.audio_queues.get(peer_id)
 
-                # Get ElevenLabs STT queue if dual STT is enabled
-                elevenlabs_queue = self.elevenlabs_audio_queues.get(peer_id)
-
                 # CRITICAL FIX: Use MediaRelay.subscribe() to create independent track copies
                 # Without this, multiple consumers (STT + other peers) share the same frame buffer,
                 # causing RTP timestamp discontinuities and jitterBufferDelay to increase continuously.
 
                 # 1. Create STT track using relay subscription
                 stt_track_source = self.relay.subscribe(track)
-                stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue, elevenlabs_queue)
+                stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue)
 
                 # 2. Store original track for relay to other peers (each will get their own subscription)
                 self.audio_tracks[peer_id] = track
@@ -789,7 +760,6 @@ class PeerConnectionManager:
 
         오디오 프레임 큐를 생성하고 STT 처리 태스크를 시작합니다.
         각 피어는 독립적인 STTService 인스턴스를 가집니다.
-        듀얼 STT 모드에서는 ElevenLabs STT도 병렬로 시작합니다.
 
         Args:
             peer_id (str): STT를 시작할 피어의 ID
@@ -798,143 +768,29 @@ class PeerConnectionManager:
         Note:
             - 피어당 하나의 STT 처리 태스크만 실행됨
             - 각 피어는 독립적인 Google STT API 스트림을 가짐
-            - 듀얼 모드 시 ElevenLabs STT도 병렬 실행
             - 인식된 텍스트는 on_transcript_callback으로 전달됨
         """
         if peer_id in self.stt_tasks:
             logger.warning(f"STT already running for peer {peer_id}")
             return
 
-        # Create dedicated STTService instance for this peer (Google)
+        # Create dedicated STTService instance for this peer
         stt_service = STTService()
         self.stt_services[peer_id] = stt_service
 
-        # Create audio queue for this peer (Google STT)
+        # Create audio queue for this peer
         # Increased from 100 to 500 to prevent overflow during STT restarts
         # 48kHz audio = ~50 frames/sec, so 500 frames = ~10 seconds buffer
         audio_queue = asyncio.Queue(maxsize=500)
         self.audio_queues[peer_id] = audio_queue
 
-        # Start Google STT processing task
+        # Start STT processing task
         task = asyncio.create_task(
             self._process_stt_for_peer(peer_id, room_name, audio_queue, stt_service)
         )
         self.stt_tasks[peer_id] = task
 
-        logger.info(f"🎤 Started Google STT processing for peer {peer_id} in room '{room_name}'")
-
-        # Start ElevenLabs STT if dual mode is enabled for this peer
-        if self.dual_stt_enabled.get(peer_id, False):
-            await self._start_elevenlabs_stt_processing(peer_id, room_name)
-
-    async def _start_elevenlabs_stt_processing(self, peer_id: str, room_name: str):
-        """피어의 ElevenLabs STT 처리를 시작합니다.
-
-        Args:
-            peer_id (str): STT를 시작할 피어의 ID
-            room_name (str): 피어가 속한 룸 이름
-        """
-        import os
-        if peer_id in self.elevenlabs_stt_tasks:
-            logger.warning(f"ElevenLabs STT already running for peer {peer_id}")
-            return
-
-        # Check if API key is available
-        if not os.getenv("ELEVENLABS_API_KEY"):
-            logger.warning("⚠️ ELEVENLABS_API_KEY not set, skipping ElevenLabs STT")
-            return
-
-        try:
-            # Create ElevenLabs STT service instance
-            elevenlabs_service = ElevenLabsSTTService()
-            self.elevenlabs_stt_services[peer_id] = elevenlabs_service
-
-            # Create audio queue for ElevenLabs STT
-            elevenlabs_queue = asyncio.Queue(maxsize=500)
-            self.elevenlabs_audio_queues[peer_id] = elevenlabs_queue
-
-            # Start ElevenLabs STT processing task
-            task = asyncio.create_task(
-                self._process_elevenlabs_stt_for_peer(peer_id, room_name, elevenlabs_queue, elevenlabs_service)
-            )
-            self.elevenlabs_stt_tasks[peer_id] = task
-
-            logger.info(f"🎤 Started ElevenLabs STT processing for peer {peer_id} in room '{room_name}'")
-        except Exception as e:
-            logger.error(f"❌ Failed to start ElevenLabs STT for peer {peer_id}: {e}")
-
-    async def _process_elevenlabs_stt_for_peer(
-        self,
-        peer_id: str,
-        room_name: str,
-        audio_queue: asyncio.Queue,
-        stt_service: ElevenLabsSTTService
-    ):
-        """피어의 오디오 스트림을 ElevenLabs STT로 처리합니다.
-
-        Args:
-            peer_id (str): 처리할 피어의 ID
-            room_name (str): 피어가 속한 룸 이름
-            audio_queue (asyncio.Queue): 오디오 프레임 큐
-            stt_service (ElevenLabsSTTService): ElevenLabs STT 서비스 인스턴스
-        """
-        retry_count = 0
-        max_retries = 100
-
-        while retry_count < max_retries:
-            try:
-                logger.info(f"🎤 Starting ElevenLabs STT stream #{retry_count + 1} for peer {peer_id}")
-
-                async for result in stt_service.process_audio_stream(audio_queue):
-                    text = result.get("text", "")
-                    is_final = result.get("is_final", False)
-                    latency_ms = result.get("latency_ms", 0)
-
-                    if text.strip():
-                        logger.info(f"💬 ElevenLabs transcript from peer {peer_id}: {text} (is_final={is_final}, latency: {latency_ms:.0f}ms)")
-
-                        # Call callback for both partial and final results
-                        if self.on_transcript_callback:
-                            # Pass is_final flag to distinguish partial vs final
-                            await self.on_transcript_callback(
-                                peer_id, room_name, text, STT_ENGINE_ELEVENLABS, is_final
-                            )
-
-                # Stream ended normally - restart
-                logger.info(f"🔄 ElevenLabs STT stream ended for peer {peer_id}, restarting...")
-                await asyncio.sleep(0.2)
-
-                # Create new service instance
-                stt_service = ElevenLabsSTTService()
-                self.elevenlabs_stt_services[peer_id] = stt_service
-                continue
-
-            except asyncio.CancelledError:
-                logger.info(f"ElevenLabs STT processing cancelled for peer {peer_id}")
-                raise
-
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"❌ ElevenLabs STT error for peer {peer_id} (attempt {retry_count}): {e}")
-
-                # Clear queue before retrying
-                while not audio_queue.empty():
-                    try:
-                        audio_queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-
-                await asyncio.sleep(1)
-
-                # Create new service instance
-                try:
-                    stt_service = ElevenLabsSTTService()
-                    self.elevenlabs_stt_services[peer_id] = stt_service
-                except Exception:
-                    pass
-                continue
-
-        logger.error(f"❌ Max ElevenLabs STT retries reached for peer {peer_id}")
+        logger.info(f"🎤 Started STT processing for peer {peer_id} in room '{room_name}'")
 
     async def _process_stt_for_peer(
         self,
@@ -1048,12 +904,11 @@ class PeerConnectionManager:
         """피어의 STT 처리를 중지합니다.
 
         STT 처리 태스크를 취소하고 오디오 큐 및 STT 서비스를 정리합니다.
-        Google STT와 ElevenLabs STT 모두 정리합니다.
 
         Args:
             peer_id (str): STT를 중지할 피어의 ID
         """
-        # Cancel Google STT task
+        # Cancel STT task
         if peer_id in self.stt_tasks:
             task = self.stt_tasks[peer_id]
             task.cancel()
@@ -1063,7 +918,7 @@ class PeerConnectionManager:
                 pass
             del self.stt_tasks[peer_id]
 
-        # Clear Google audio queue
+        # Clear audio queue
         if peer_id in self.audio_queues:
             # Send None to signal end of stream
             try:
@@ -1072,91 +927,8 @@ class PeerConnectionManager:
                 pass
             del self.audio_queues[peer_id]
 
-        # Remove Google STT service instance
+        # Remove STT service instance
         if peer_id in self.stt_services:
             del self.stt_services[peer_id]
 
-        # Cancel ElevenLabs STT task
-        if peer_id in self.elevenlabs_stt_tasks:
-            task = self.elevenlabs_stt_tasks[peer_id]
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            del self.elevenlabs_stt_tasks[peer_id]
-
-        # Clear ElevenLabs audio queue
-        if peer_id in self.elevenlabs_audio_queues:
-            try:
-                await self.elevenlabs_audio_queues[peer_id].put(None)
-            except asyncio.QueueFull:
-                pass
-            del self.elevenlabs_audio_queues[peer_id]
-
-        # Remove ElevenLabs STT service instance
-        if peer_id in self.elevenlabs_stt_services:
-            del self.elevenlabs_stt_services[peer_id]
-
-        # Clear dual STT flag
-        if peer_id in self.dual_stt_enabled:
-            del self.dual_stt_enabled[peer_id]
-
-        logger.info(f"🛑 Stopped all STT processing for peer {peer_id}")
-
-    async def enable_dual_stt(self, peer_id: str, room_name: str, enabled: bool = True):
-        """피어의 듀얼 STT 모드를 활성화/비활성화합니다.
-
-        활성화 시 ElevenLabs STT도 병렬로 처리합니다.
-        비활성화 시 ElevenLabs STT를 중지합니다.
-
-        Args:
-            peer_id (str): 대상 피어 ID
-            room_name (str): 피어가 속한 룸 이름
-            enabled (bool): 듀얼 STT 활성화 여부
-        """
-        self.dual_stt_enabled[peer_id] = enabled
-
-        if enabled:
-            # Start ElevenLabs STT if not already running
-            if peer_id not in self.elevenlabs_stt_tasks:
-                await self._start_elevenlabs_stt_processing(peer_id, room_name)
-
-            # CRITICAL: Update existing AudioRelayTrack with the new queue
-            # Without this, audio frames won't be sent to ElevenLabs
-            if peer_id in self.audio_tracks and peer_id in self.elevenlabs_audio_queues:
-                audio_track = self.audio_tracks[peer_id]
-                if isinstance(audio_track, AudioRelayTrack):
-                    audio_track.elevenlabs_queue = self.elevenlabs_audio_queues[peer_id]
-                    logger.info(f"🔗 Connected ElevenLabs queue to AudioRelayTrack for peer {peer_id}")
-
-            logger.info(f"✅ Dual STT enabled for peer {peer_id}")
-        else:
-            # Disconnect queue from AudioRelayTrack first
-            if peer_id in self.audio_tracks:
-                audio_track = self.audio_tracks[peer_id]
-                if isinstance(audio_track, AudioRelayTrack):
-                    audio_track.elevenlabs_queue = None
-                    logger.info(f"🔌 Disconnected ElevenLabs queue from AudioRelayTrack for peer {peer_id}")
-
-            # Stop ElevenLabs STT
-            if peer_id in self.elevenlabs_stt_tasks:
-                task = self.elevenlabs_stt_tasks[peer_id]
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                del self.elevenlabs_stt_tasks[peer_id]
-
-            if peer_id in self.elevenlabs_audio_queues:
-                try:
-                    await self.elevenlabs_audio_queues[peer_id].put(None)
-                except asyncio.QueueFull:
-                    pass
-                del self.elevenlabs_audio_queues[peer_id]
-
-            if peer_id in self.elevenlabs_stt_services:
-                del self.elevenlabs_stt_services[peer_id]
-
-            logger.info(f"⏹️ Dual STT disabled for peer {peer_id}")
+        logger.info(f"🛑 Stopped STT processing for peer {peer_id}")

@@ -141,7 +141,7 @@ origins = [
 # CORS - 개발 환경에서는 모든 로컬 네트워크 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$|^https://baro-gochi\.github\.io$",
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$|^https://baro-gochi\.github\.io$|^https://.*\.ngrok(-free)?\.app$|^https://.*\.ngrok\.io$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -577,14 +577,13 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             peer_id (str): 음성을 전송한 피어의 ID
             room_name (str): 피어가 속한 룸 이름
             transcript (str): 인식된 텍스트
-            source (str): STT 엔진 소스 ("google" 또는 "elevenlabs")
+            source (str): STT 엔진 소스
             is_final (bool): 최종 결과 여부 (False면 partial/interim)
 
         Note:
             - 같은 룸의 모든 피어에게 브로드캐스트
             - 메시지 형식: {"type": "transcript", "data": {...}}
-            - Google STT 결과만 LangGraph 에이전트 실행 (중복 방지)
-            - ElevenLabs partial 결과도 UI 표시용으로 전송
+            - 최종 결과만 LangGraph 에이전트 실행
         """
         result_type = "final" if is_final else "partial"
         logger.info(f"💬 [{source.upper()}:{result_type}] Transcript from {peer_id} in room '{room_name}': {transcript}")
@@ -609,7 +608,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "nickname": nickname,
                     "text": transcript,
                     "timestamp": current_time,
-                    "source": source,  # Google or ElevenLabs
+                    "source": source,
                     "is_final": is_final  # True for final, False for partial
                 }
             }
@@ -865,34 +864,6 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
                     logger.info(f"Peer {nickname} ({peer_id}) left room '{current_room}'")
                     current_room = None
-
-            elif message_type == "enable_dual_stt":
-                # Handle dual STT enable/disable request
-                if not current_room:
-                    await websocket.send_json({
-                        "type": "error",
-                        "data": {"message": "Not in a room"}
-                    })
-                    continue
-
-                enabled = data.get("data", {}).get("enabled", True)
-
-                try:
-                    await peer_manager.enable_dual_stt(peer_id, current_room, enabled)
-                    await websocket.send_json({
-                        "type": "dual_stt_status",
-                        "data": {
-                            "enabled": enabled,
-                            "peer_id": peer_id
-                        }
-                    })
-                    logger.info(f"{'✅ Enabled' if enabled else '⏹️ Disabled'} dual STT for peer {peer_id}")
-                except Exception as e:
-                    logger.error(f"Error toggling dual STT: {e}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "data": {"message": f"Failed to toggle dual STT: {str(e)}"}
-                    })
 
             elif message_type == "get_rooms":
                 # Send list of available rooms

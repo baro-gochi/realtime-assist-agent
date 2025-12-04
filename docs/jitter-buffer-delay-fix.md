@@ -31,7 +31,7 @@
 @pc.on("track")
 async def on_track(track):
     # 같은 트랙을 여러 소비자에게 직접 전달
-    relay_track = AudioRelayTrack(track, stt_queue, elevenlabs_queue)
+    relay_track = AudioRelayTrack(track, stt_queue)
     self.audio_tracks[peer_id] = relay_track  # 다른 피어 전달용
     consumer_task = asyncio.create_task(self._consume_audio_track(peer_id, relay_track))  # STT용
     await self._relay_to_room_peers(peer_id, room_name, relay_track)  # 릴레이용
@@ -48,7 +48,7 @@ async def on_track(track):
 async def on_track(track):
     # STT용 트랙 (별도 구독)
     stt_track_source = self.relay.subscribe(track)
-    stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue, elevenlabs_queue)
+    stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue)
 
     # 원본 트랙 저장 (릴레이 시 새로 구독)
     self.audio_tracks[peer_id] = track
@@ -271,3 +271,25 @@ pc.addTrack(paced_track)
 |------|-----------|
 | 2024-XX-XX | 1차 수정: MediaRelay.subscribe() 적용 - 음질 개선 |
 | 2024-XX-XX | 2차 수정: PacedRelayTrack 구현 - jitterBufferDelay 안정화 |
+| 2024-12-04 | ElevenLabs STT 제거 - Google STT 단일 엔진으로 통합 |
+
+---
+
+## ElevenLabs STT 제거 사유
+
+### 결정
+ElevenLabs STT를 제거하고 Google Cloud Speech-to-Text 단일 엔진으로 통합
+
+### 제거 이유
+**Google STT의 모델 적응(Adaptation) 기능 부재**
+
+Google Cloud Speech-to-Text v2는 **PhraseSet**과 **CustomClass**를 통한 모델 적응 기능을 제공:
+- **PhraseSet**: 도메인 특화 용어에 가중치(boost) 부여하여 인식 정확도 향상
+- **CustomClass**: 커스텀 엔티티 그룹 정의 (제품명, 전문 용어 등)
+
+ElevenLabs STT는 이러한 모델 적응 기능을 지원하지 않아, 고객 상담 도메인의 전문 용어 인식에 한계가 있음.
+
+### 영향
+- 듀얼 STT 비교 기능 제거
+- STT 관련 코드 단순화
+- 프론트엔드 STT 비교 페이지 제거

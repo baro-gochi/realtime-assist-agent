@@ -59,8 +59,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Google STT 최적화 상수
-TARGET_SAMPLE_RATE = 16000  # ElevenLabs와 동일하게 16kHz
-TARGET_CHUNK_DURATION = 0.25  # 250ms 청크 (ElevenLabs와 동일)
+TARGET_SAMPLE_RATE = 48000  # WebRTC 48kHz 직접 전송 (리샘플링 불필요)
+TARGET_CHUNK_DURATION = 0.25  # 250ms 청크
 
 
 class STTService:
@@ -383,8 +383,6 @@ class STTService:
                     chunk_count += 1
                     if chunk_count == 1:
                         logger.info(f"✅ First audio frame received! Starting transfer...")
-                    if chunk_count % 50 == 0:
-                        logger.info(f"📦 Processing audio chunk #{chunk_count}")
 
                     sync_queue.put(frame)
                 logger.info(f"Frame transfer completed. Total chunks: {chunk_count}")
@@ -406,7 +404,7 @@ class STTService:
             yield config_request
             logger.info("✅ Config request sent, waiting for audio frames...")
 
-            # 🔧 ElevenLabs와 동일한 청크 누적 방식
+            # 250ms 청크 누적 방식
             frame_count = 0
             chunk_count = 0
             accumulated_arrays = []
@@ -416,23 +414,28 @@ class STTService:
             first_frame_timeout = 60.0
 
             def process_accumulated_chunks():
-                """누적된 오디오를 처리하여 전송"""
+                """누적된 오디오를 처리하여 전송 (48kHz 직접 전송, 리샘플링 없음)"""
                 nonlocal chunk_count
                 if not accumulated_arrays:
                     return None
 
                 # 모든 배열을 하나로 합침
                 combined_array = np.concatenate(accumulated_arrays)
-
-                # 48kHz → 16kHz 리샘플링 (ElevenLabs와 동일)
-                resampled = self._resample_audio(combined_array, self.input_sample_rate, self.sample_rate)
-                resampled = resampled.astype(np.int16)
+                combined_array = combined_array.astype(np.int16)
 
                 chunk_count += 1
-                if chunk_count == 1:
-                    logger.info(f"📤 First 250ms chunk: {len(combined_array)} samples @ 48kHz → {len(resampled)} samples @ 16kHz")
 
-                audio_bytes = resampled.tobytes()
+                # 오디오 상태 로그 (첫 청크 + 100청크마다)
+                if chunk_count == 1 or chunk_count % 100 == 0:
+                    max_val = np.abs(combined_array).max()
+                    mean_val = np.abs(combined_array).mean()
+                    non_zero = np.count_nonzero(combined_array)
+                    logger.info(
+                        f"🔊 Audio chunk #{chunk_count}: samples={len(combined_array)}, "
+                        f"max={max_val}, mean={mean_val:.1f}, non_zero={non_zero}/{len(combined_array)}"
+                    )
+
+                audio_bytes = combined_array.tobytes()
                 return audio_bytes
 
             while True:
@@ -506,7 +509,7 @@ class STTService:
                 frame_duration = frame.samples / frame.sample_rate
                 accumulated_duration += frame_duration
 
-                # 250ms 이상 누적되면 전송 (ElevenLabs와 동일)
+                # 250ms 이상 누적되면 전송
                 if accumulated_duration >= TARGET_CHUNK_DURATION:
                     audio_bytes = process_accumulated_chunks()
                     if audio_bytes:
@@ -519,7 +522,7 @@ class STTService:
                         else:
                             yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
 
-                        if chunk_count % 40 == 0:  # ~10초마다 로그
+                        if chunk_count % 200 == 0:  # ~50초마다 로그
                             logger.info(f"📦 Sent {chunk_count} chunks to Google STT")
 
                     # 누적 초기화

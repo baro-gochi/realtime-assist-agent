@@ -274,7 +274,6 @@ STUN_SERVER_URL=stun:turn.your-domain.com:3478
 
 # API Keys
 OPENAI_API_KEY=sk-xxx
-ELEVENLABS_API_KEY=xxx
 
 # CORS 허용 오리진 (GitHub Pages)
 ALLOWED_ORIGINS=https://username.github.io
