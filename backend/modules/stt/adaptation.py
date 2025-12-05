@@ -35,7 +35,7 @@ CustomClass는 단독으로 사용되지 않고, PhraseSet의 phrase에서 참�
 ## 사용 예시
 
 ```python
-from stt_adaptation import STTAdaptationConfig
+from modules.stt import STTAdaptationConfig
 
 # 1. 기본 사용 (YAML 파일에서 로드)
 config = STTAdaptationConfig.from_yaml("stt_phrases.yaml")
@@ -57,14 +57,13 @@ config.add_phrase("${products} 주문", boost=15)
 - https://cloud.google.com/speech-to-text/v2/docs
 
 Examples:
-    >>> from stt_adaptation import STTAdaptationConfig
+    >>> from modules.stt import STTAdaptationConfig
     >>> config = STTAdaptationConfig()
     >>> config.add_phrase("고객 상담", boost=10)
     >>> adaptation = config.build_adaptation()
 """
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, TYPE_CHECKING
 from pathlib import Path
@@ -184,7 +183,7 @@ class STTAdaptationConfig:
             >>> config = STTAdaptationConfig.from_yaml("phrases.yaml")
 
         stt_service.py와 통합:
-            >>> from stt_adaptation import get_default_adaptation
+            >>> from modules.stt import get_default_adaptation
             >>> adaptation = get_default_adaptation()
             >>> # RecognitionConfig(adaptation=adaptation)
     """
@@ -508,14 +507,14 @@ def get_default_adaptation() -> Optional[SpeechAdaptationType]:
 
     다음 순서로 설정 파일을 찾습니다:
     1. 환경 변수 STT_ADAPTATION_CONFIG 경로
-    2. backend/stt_phrases.yaml
-    3. backend/stt_phrases.json
+    2. backend/config/stt_phrases.yaml
+    3. backend/config/stt_phrases.json
 
     Returns:
         SpeechAdaptation 객체 또는 None
 
     Examples:
-        >>> from stt_adaptation import get_default_adaptation
+        >>> from modules.stt import get_default_adaptation
         >>> adaptation = get_default_adaptation()
         >>> # RecognitionConfig에서 사용
         >>> recognition_config = cloud_speech.RecognitionConfig(
@@ -528,27 +527,16 @@ def get_default_adaptation() -> Optional[SpeechAdaptationType]:
     if _default_config is not None:
         return _default_config.build_adaptation()
 
-    # 환경 변수에서 경로 확인
-    config_path = os.getenv("STT_ADAPTATION_CONFIG")
+    # Config에서 경로 가져오기 (순환 참조 방지를 위해 lazy import)
+    from .config import adaptation_config
 
-    if config_path:
-        if config_path.endswith(".yaml") or config_path.endswith(".yml"):
-            _default_config = STTAdaptationConfig.from_yaml(config_path)
+    config_path = adaptation_config.config_path
+
+    if config_path and config_path.exists():
+        if config_path.suffix in (".yaml", ".yml"):
+            _default_config = STTAdaptationConfig.from_yaml(str(config_path))
         else:
-            _default_config = STTAdaptationConfig.from_json(config_path)
-        return _default_config.build_adaptation()
-
-    # 기본 경로 탐색
-    backend_dir = Path(__file__).parent
-
-    yaml_path = backend_dir / "stt_phrases.yaml"
-    if yaml_path.exists():
-        _default_config = STTAdaptationConfig.from_yaml(str(yaml_path))
-        return _default_config.build_adaptation()
-
-    json_path = backend_dir / "stt_phrases.json"
-    if json_path.exists():
-        _default_config = STTAdaptationConfig.from_json(str(json_path))
+            _default_config = STTAdaptationConfig.from_json(str(config_path))
         return _default_config.build_adaptation()
 
     # 설정 파일 없음 - 빈 설정
@@ -637,83 +625,3 @@ def create_customer_service_adaptation(
         config.add_phrase("${products} 문의", boost=12)
 
     return config
-
-
-# === 단위 테스트 / 예제 ===
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-
-    print("=== STT Adaptation Config Examples ===\n")
-
-    # 1. 코드에서 직접 생성
-    print("1. 코드에서 직접 생성:")
-    config = STTAdaptationConfig()
-    config.add_phrase("결제 취소", boost=10)
-    config.add_phrase("배송 조회", boost=10)
-    config.add_custom_class("products", ["아이폰", "갤럭시", "픽셀"])
-    config.add_phrase("${products} 주문", boost=15)
-    print(f"   Config: {config.to_dict()}\n")
-
-    # 2. 고객 상담 기본 설정
-    print("2. 고객 상담 기본 설정:")
-    cs_config = create_customer_service_adaptation(
-        product_names=["아이폰 15", "갤럭시 S24", "픽셀 8"]
-    )
-    adaptation = cs_config.build_adaptation()
-    if adaptation:
-        print(f"   Phrase sets: {len(adaptation.phrase_sets)}")
-        print(f"   Custom classes: {len(adaptation.custom_classes)}\n")
-
-    # 3. 딕셔너리에서 로드
-    print("3. 딕셔너리에서 로드:")
-    data = {
-        "enabled": True,
-        "phrases": [
-            {"value": "특가 상품", "boost": 12},
-            "신상품 입고"
-        ],
-        "custom_classes": [
-            {"name": "brands", "items": ["삼성", "애플", "LG"]}
-        ]
-    }
-    dict_config = STTAdaptationConfig.from_dict(data)
-    print(f"   Phrases: {len(dict_config._default_phrase_set.phrases)}")
-    print(f"   Custom classes: {len(dict_config.custom_classes)}\n")
-
-    print("=== YAML 파일 예제 형식 ===\n")
-    print("""
-# stt_phrases.yaml
-enabled: true
-
-# 단순 구문 목록 (기본 boost)
-phrases:
-  - 결제 취소
-  - value: 배송 조회
-    boost: 10
-  - value: 환불 요청
-    boost: 12
-
-# 구문 집합 (그룹화)
-phrase_sets:
-  - name: greetings
-    boost: 5
-    phrases:
-      - 안녕하세요
-      - 감사합니다
-
-  - name: commands
-    boost: 10
-    phrases:
-      - 상담원 연결
-      - AS 접수
-
-# 커스텀 클래스 (항목 그룹)
-custom_classes:
-  - name: products
-    display_name: 상품 목록
-    items:
-      - 아이폰 15
-      - 갤럭시 S24
-      - 픽셀 8
-""")

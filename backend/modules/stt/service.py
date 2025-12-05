@@ -17,6 +17,7 @@ Architecture:
 
 Examples:
     기본 사용법:
+        >>> from modules.stt import STTService
         >>> service = STTService()
         >>> async for text in service.process_audio_stream(audio_frames):
         ...     print(f"인식된 텍스트: {text}")
@@ -29,14 +30,13 @@ Examples:
         ... )
 
 See Also:
-    peer_manager.py: 오디오 프레임 캡처
+    webrtc.peer_manager: 오디오 프레임 캡처
     app.py: WebSocket을 통한 결과 전송
     Google Cloud Speech-to-Text V2 Documentation:
         https://cloud.google.com/speech-to-text/v2/docs
 """
 import asyncio
 import logging
-import os
 from typing import AsyncIterator, Optional, List
 from google.cloud.speech_v2 import SpeechClient
 from google.cloud.speech_v2.types import cloud_speech
@@ -47,9 +47,12 @@ import numpy as np
 import queue
 import threading
 
-# Adaptation 모듈 (선택적)
+# Config 모듈
+from .config import google_cloud_config, recognition_config, streaming_config
+
+# Adaptation 모듈 (동일 패키지에서 import)
 try:
-    from stt_adaptation import get_default_adaptation, STTAdaptationConfig
+    from .adaptation import get_default_adaptation, STTAdaptationConfig
     ADAPTATION_AVAILABLE = True
 except ImportError:
     ADAPTATION_AVAILABLE = False
@@ -57,10 +60,6 @@ except ImportError:
     STTAdaptationConfig = None
 
 logger = logging.getLogger(__name__)
-
-# Google STT 최적화 상수
-TARGET_SAMPLE_RATE = 48000  # WebRTC 48kHz 직접 전송 (리샘플링 불필요)
-TARGET_CHUNK_DURATION = 0.25  # 250ms 청크
 
 
 class STTService:
@@ -85,16 +84,17 @@ class STTService:
         - GOOGLE_CLOUD_PROJECT 환경 변수 필수 (프로젝트 ID)
         - WebRTC 오디오는 자동으로 인코딩 감지됨
         - 25KB 스트림 제한 주의
-        - adaptation 설정: backend/stt_phrases.yaml 파일 또는 STT_ADAPTATION_CONFIG 환경 변수
+        - adaptation 설정: backend/config/stt_phrases.yaml 파일 또는 STT_ADAPTATION_CONFIG 환경 변수
 
     Examples:
+        >>> from modules.stt import STTService
         >>> service = STTService()
         >>> # 오디오 스트림 처리
         >>> async for transcript in service.process_audio_stream(audio_queue):
         ...     print(f"인식 결과: {transcript}")
 
     See Also:
-        stt_adaptation.py: PhraseSet/CustomClass 설정 모듈
+        adaptation.py: PhraseSet/CustomClass 설정 모듈
     """
 
     def __init__(
@@ -130,31 +130,30 @@ class STTService:
             - .env 파일에서 환경 변수 로드 필요
             - 서비스 계정 키 파일 권한 확인 필요
             - v2 API는 Recognizer 개념 필수
-            - adaptation 설정은 backend/stt_phrases.yaml 파일 참조
+            - adaptation 설정은 backend/config/stt_phrases.yaml 파일 참조
         """
         # Google Cloud 인증 및 프로젝트 확인 프로젝트 ID (v2에서 필수)
-        if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        if not google_cloud_config.CREDENTIALS_PATH:
             logger.warning(
                 "GOOGLE_APPLICATION_CREDENTIALS not set. "
                 "STT service may not work properly."
             )
-            
-        self.project_id = project_id or os.getenv("GOOGLE_CLOUD_PROJECT")
+
+        self.project_id = project_id or google_cloud_config.PROJECT_ID
         if not self.project_id:
             raise ValueError(
                 "GOOGLE_CLOUD_PROJECT environment variable must be set for v2 API"
             )
 
-        # Configuration from environment or defaults
-        default_language = os.getenv("STT_LANGUAGE_CODE", "ko-KR")
-        self.language_codes = language_codes or [default_language]
+        # Configuration from config or parameters
+        self.language_codes = language_codes or recognition_config.language_codes
 
-        self.model = model or os.getenv("STT_MODEL", "short")
-        self.sample_rate = TARGET_SAMPLE_RATE
-        self.input_sample_rate = int(os.getenv("STT_SAMPLE_RATE_HERTZ", "48000"))  # WebRTC 입력 샘플레이트 (32kbps 비트레이트에 최적화)
+        self.model = model or recognition_config.MODEL
+        self.sample_rate = streaming_config.TARGET_SAMPLE_RATE
+        self.input_sample_rate = recognition_config.SAMPLE_RATE_HERTZ
 
         # Location 설정 (리전별 엔드포인트 지원)
-        self.location = os.getenv("STT_LOCATION", "global")
+        self.location = recognition_config.LOCATION
 
         # Regional endpoint 설정
         if self.location != "global":
@@ -172,21 +171,21 @@ class STTService:
         self.enable_automatic_punctuation = (
             enable_automatic_punctuation
             if enable_automatic_punctuation is not None
-            else os.getenv("STT_ENABLE_AUTOMATIC_PUNCTUATION", "true").lower() == "true"
+            else recognition_config.ENABLE_AUTOMATIC_PUNCTUATION
         )
 
         # Enable interim results for real-time partial transcript display
         self.enable_interim_results = (
             enable_interim_results
             if enable_interim_results is not None
-            else os.getenv("STT_ENABLE_INTERIM_RESULTS", "true").lower() == "true"
+            else recognition_config.ENABLE_INTERIM_RESULTS
         )
 
         # Adaptation (PhraseSet/CustomClass) 설정
         self.enable_adaptation = (
             enable_adaptation
             if enable_adaptation is not None
-            else os.getenv("STT_ENABLE_ADAPTATION", "true").lower() == "true"
+            else recognition_config.ENABLE_ADAPTATION
         )
         self.adaptation = None
         if self.enable_adaptation and ADAPTATION_AVAILABLE:
@@ -208,32 +207,6 @@ class STTService:
             f"interim={self.enable_interim_results}, "
             f"adaptation={'enabled' if self.adaptation else 'disabled'}"
         )
-
-    def _resample_audio(self, audio_array: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """오디오를 목표 샘플레이트로 리샘플링합니다.
-
-        간단한 선형 보간 방식을 사용합니다.
-
-        Args:
-            audio_array: 원본 오디오 배열
-            orig_sr: 원본 샘플레이트
-            target_sr: 목표 샘플레이트
-
-        Returns:
-            리샘플링된 오디오 배열
-        """
-        if orig_sr == target_sr:
-            return audio_array
-
-        # 리샘플링 비율 계산
-        ratio = target_sr / orig_sr
-        new_length = int(len(audio_array) * ratio)
-
-        # 선형 보간으로 리샘플링
-        indices = np.linspace(0, len(audio_array) - 1, new_length)
-        resampled = np.interp(indices, np.arange(len(audio_array)), audio_array)
-
-        return resampled.astype(audio_array.dtype)
 
     def _create_streaming_config(self) -> cloud_speech.StreamingRecognitionConfig:
         """스트리밍 인식을 위한 Google STT v2 설정 생성.
@@ -510,7 +483,7 @@ class STTService:
                 accumulated_duration += frame_duration
 
                 # 250ms 이상 누적되면 전송
-                if accumulated_duration >= TARGET_CHUNK_DURATION:
+                if accumulated_duration >= streaming_config.CHUNK_DURATION:
                     audio_bytes = process_accumulated_chunks()
                     if audio_bytes:
                         chunk_size = len(audio_bytes)

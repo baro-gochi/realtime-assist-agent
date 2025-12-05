@@ -16,24 +16,19 @@ Architecture:
     - 증분 요약: 기존 요약 + 새로운 transcript만 처리
 
 Example:
+    >>> from modules.agent import get_or_create_agent
     >>> agent = get_or_create_agent("상담실1")
     >>> result = await agent.on_new_transcript("고객", "김철수", "환불하고 싶어요")
     >>> print(result)  # {"current_summary": '{"summary": "...", ...}', "last_summarized_index": 1}
 """
-import os
 import logging
 import time
 from typing import Dict, Any
-from agent import create_agent_graph, ConversationState
+from .graph import create_agent_graph, ConversationState
+from .config import llm_config
 from langchain.chat_models import init_chat_model
-from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
-
-load_dotenv()
-
-# LLM 모델 설정 (모든 에이전트가 공유)
-LLM_MODEL = "openai:gpt-5-nano"
 
 
 
@@ -55,7 +50,7 @@ class RoomAgent:
             room_name (str): 방 이름
         """
         # LLM 인스턴스 초기화 (클래스 생성 시 실행)
-        logger.info(f"🤖 Initializing LLM: {LLM_MODEL}")
+        logger.info(f"🤖 Initializing LLM: {llm_config.MODEL}")
 
         try:
             # TTFT 최적화: temperature=0 (Greedy Search)
@@ -64,11 +59,11 @@ class RoomAgent:
             # - reasoning_effort="minimal": 간단한 요약에는 minimal reasoning으로 빠르게
             # - streaming=True: 첫 토큰 즉시 반환
             llm = init_chat_model(
-                LLM_MODEL,
-                temperature=0,
-                max_completion_tokens=150,
-                reasoning_effort="minimal",
-                streaming=True
+                llm_config.MODEL,
+                temperature=llm_config.TEMPERATURE,
+                max_completion_tokens=llm_config.MAX_TOKENS,
+                reasoning_effort=llm_config.REASONING_EFFORT or "minimal"
+                # streaming=True
             )
 
             # 시스템 메시지 (Runtime Context로 전달할 내용) - JSON 출력 강제, 한 문장 요약 강조

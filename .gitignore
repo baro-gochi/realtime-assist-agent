@@ -10,6 +10,9 @@ wheels/
 .venv
 .env
 
+# Config files (contain secrets)
+backend/config/stt_phrases.yaml
+
 # Node.js
 node_modules/
 npm-debug.log*

@@ -64,13 +64,13 @@ from pydantic import BaseModel
 from typing import Dict, Any
 import httpx
 
-from peer_manager import PeerConnectionManager
-from room_manager import RoomManager
-from agent_manager import get_or_create_agent, remove_agent, room_agents
+from modules import PeerConnectionManager, RoomManager
+from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
+from pathlib import Path
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from config/.env
+load_dotenv(Path(__file__).parent / "config" / ".env")
 
 # Access password for authentication
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "")
@@ -133,15 +133,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="WebRTC Signaling Server with Rooms", lifespan=lifespan)
 
-origins = [
-    "http://localhost:3000",
-    "https://my-dev-webrtc.loca.lt",
-]
-
 # CORS - 개발 환경에서는 모든 로컬 네트워크 허용
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$|^https://baro-gochi\.github\.io$|^https://.*\.ngrok(-free)?\.app$|^https://.*\.ngrok\.io$",
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|172\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$|^https://.*\.loca\.lt$|^https://baro-gochi\.github\.io$|^https://.*\.ngrok(-free)?\.(app|dev|io)$|^https://.*\.trycloudflare\.com$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

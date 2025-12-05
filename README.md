@@ -153,10 +153,19 @@ npm run dev
 ```
 realtime-assist-agent/
 ├── backend/                    # FastAPI 서버
-│   ├── app.py                 # 시그널링 서버 + WebSocket
-│   ├── room_manager.py        # 방 관리 및 참가자 추적
-│   ├── peer_manager.py        # WebRTC 연결 및 미디어 중계
-│   ├── stt_service.py         # Google STT v2 스트리밍 서비스
+│   ├── app.py                 # 시그널링 서버 + WebSocket (메인 엔트리)
+│   ├── modules/               # 모듈화된 백엔드 코드 (2024-12)
+│   │   ├── __init__.py        # 메인 exports
+│   │   ├── webrtc/            # WebRTC 모듈
+│   │   │   ├── tracks.py      # AudioRelayTrack (STT 큐 연동)
+│   │   │   ├── room_manager.py# RoomManager, Peer, TranscriptEntry
+│   │   │   └── peer_manager.py# PeerConnectionManager (SFU, ICE)
+│   │   ├── stt/               # Speech-to-Text 모듈
+│   │   │   ├── service.py     # STTService (Google Cloud v2)
+│   │   │   └── adaptation.py  # PhraseSet/CustomClass 설정
+│   │   └── agent/             # LangGraph 에이전트 모듈
+│   │       ├── graph.py       # StateGraph 정의 (ConversationState)
+│   │       └── manager.py     # RoomAgent, 에이전트 생명주기
 │   └── .env.example           # 환경 변수 템플릿
 │
 ├── frontend/                   # React 앱
@@ -271,11 +280,14 @@ cd backend
 python app.py
 ```
 
-**주요 모듈:**
-- `app.py`: WebSocket 시그널링 및 라우팅
-- `peer_manager.py`: WebRTC 연결 및 STT 통합
-- `room_manager.py`: 방 및 참가자 관리
-- `stt_service.py`: Google STT v2 스트리밍
+**주요 모듈 (`backend/modules/`):**
+- `webrtc/peer_manager.py`: WebRTC 연결, SFU 릴레이, STT 통합
+- `webrtc/room_manager.py`: 방 및 참가자 관리
+- `webrtc/tracks.py`: AudioRelayTrack (STT 큐 연동)
+- `stt/service.py`: Google STT v2 스트리밍
+- `stt/adaptation.py`: PhraseSet/CustomClass 설정
+- `agent/graph.py`: LangGraph StateGraph 정의
+- `agent/manager.py`: RoomAgent, 에이전트 생명주기 관리
 
 ### Frontend 개발
 

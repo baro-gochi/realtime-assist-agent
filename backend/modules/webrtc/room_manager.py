@@ -26,14 +26,13 @@ Examples:
         >>> print(f"참가자 수: {len(peers)}")
 
 See Also:
-    app.py: WebSocket 시그널링 서버
     peer_manager.py: WebRTC 연결 관리
 """
 import logging
 import os
 from datetime import datetime
-from typing import Dict, List, Set, Optional
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -236,8 +235,8 @@ class RoomManager:
                 # Save transcript to file before deleting room
                 self._save_transcript_to_file(room_name)
 
-                # Clean up agent for this room
-                from agent_manager import remove_agent
+                # Clean up agent for this room (lazy import to avoid circular dependency)
+                from ..agent import remove_agent
                 remove_agent(room_name)
 
                 # Clean up room data

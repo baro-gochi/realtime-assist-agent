@@ -67,10 +67,7 @@ export default defineConfig({
      * # 터널 사용 시
      * VITE_API_URL=https://my-dev-backend.loca.lt npm run dev
      */
-    allowedHosts: [
-      "my-dev-webrtc.loca.lt",
-      "*",
-    ],
+    allowedHosts: ['.loca.lt', '.ngrok.io', '.ngrok-free.app', '.trycloudflare.com'],  // 호스트 허용 (localtunnel, ngrok 등)
     proxy: {
       '/ws': {
         target: process.env.VITE_API_URL || 'http://localhost:8000',

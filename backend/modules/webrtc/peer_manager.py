@@ -16,7 +16,6 @@ Architecture:
     - Track Management: 각 피어의 오디오 트랙을 독립적으로 관리
 
 Classes:
-    AudioRelayTrack: STT 처리를 위한 오디오 프레임 캡처 기능이 있는 트랙
     PeerConnectionManager: WebRTC 연결 및 오디오 릴레이 관리
 
 WebRTC Flow:
@@ -40,7 +39,6 @@ Examples:
         >>> await manager.close_peer_connection("peer-123")
 
 See Also:
-    app.py: WebSocket 시그널링 서버
     room_manager.py: 룸 및 참가자 관리
     aiortc Documentation: https://aiortc.readthedocs.io/
 """
@@ -49,84 +47,12 @@ import logging
 from typing import Dict, Optional, Callable, List
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
-from aiortc.rtcicetransport import RTCIceCandidate
-from stt_service import STTService
+
+from .tracks import AudioRelayTrack
+from .config import connection_config
+from ..stt import STTService
 
 logger = logging.getLogger(__name__)
-
-# STT 엔진 설정
-STT_ENGINE_GOOGLE = "google"
-MAX_WAIT = 5.0
-
-
-class AudioRelayTrack(MediaStreamTrack):
-    """오디오 프레임을 릴레이하고 STT 처리를 위해 캡처하는 트랙.
-
-    다른 참가자에게 오디오를 전달하면서 동시에 음성 인식 처리를 위한
-    프레임을 STT 큐에 전달합니다.
-
-    Attributes:
-        kind (str): 트랙 종류 ("audio")
-        track (MediaStreamTrack): 원본 오디오 트랙
-        stt_queue (Optional[asyncio.Queue]): STT 처리를 위한 오디오 프레임 큐
-
-    Note:
-        - 큐가 가득 차면 새 프레임은 버려짐 (오버플로우 방지)
-        - stt_queue가 None이면 STT 처리 건너뜀
-
-    Examples:
-        >>> original_track = ... # 원본 오디오 트랙
-        >>> stt_queue = asyncio.Queue(maxsize=100)
-        >>> relay_track = AudioRelayTrack(original_track, stt_queue)
-        >>> frame = await relay_track.recv()  # 프레임 수신, STT 큐 전달, 릴레이
-    """
-    kind = "audio"
-
-    def __init__(
-        self,
-        track: MediaStreamTrack,
-        stt_queue: Optional[asyncio.Queue] = None
-    ):
-        """AudioRelayTrack 초기화.
-
-        Args:
-            track (MediaStreamTrack): 릴레이할 원본 오디오 트랙
-            stt_queue (Optional[asyncio.Queue]): STT 처리용 큐 (None이면 비활성화)
-        """
-        super().__init__()
-        self.track = track
-        self.stt_queue = stt_queue
-
-    async def recv(self):
-        """오디오 프레임을 수신하고 릴레이합니다.
-
-        원본 트랙에서 프레임을 받아 STT 처리를 위해 큐에 저장한 후
-        다른 참가자에게 전달합니다.
-
-        Returns:
-            AudioFrame: 수신한 오디오 프레임
-
-        Note:
-            - 큐가 가득 차면 QueueFull 예외를 무시하고 프레임을 버림
-            - 프레임은 항상 반환되어 릴레이 기능은 유지됨
-        """
-        frame = await self.track.recv()
-
-        # Send frame to STT queue if available
-        if self.stt_queue:
-            try:
-                # Debug: Log first frame
-                if not hasattr(self, '_first_frame_logged'):
-                    logger.info("🎤 AudioRelayTrack: First frame sent to STT queue!")
-                    self._first_frame_logged = True
-
-                self.stt_queue.put_nowait(frame)
-            except asyncio.QueueFull:
-                # Skip frame if queue is full
-                logger.warning("⚠️ STT queue full, dropping audio frame")
-                pass
-
-        return frame
 
 
 class PeerConnectionManager:
@@ -196,7 +122,7 @@ class PeerConnectionManager:
         # STT service instances per peer (peer_id -> STTService)
         # Each peer needs its own STT service for independent streaming
         self.stt_services: Dict[str, STTService] = {}
-        self.on_transcript_callback: Optional[Callable[[str, str, str, str], None]] = None  # peer_id, room, text, source
+        self.on_transcript_callback: Optional[Callable[[str, str, str, str, bool], None]] = None  # peer_id, room, text, source, is_final
 
         # Audio processing queues for STT (peer_id -> Queue)
         self.audio_queues: Dict[str, asyncio.Queue] = {}
@@ -254,35 +180,30 @@ class PeerConnectionManager:
         """
         # ICE 서버 설정 (STUN/TURN)
         from aiortc import RTCConfiguration, RTCIceServer
-        import os
-
-        # AWS coturn 서버 설정 (Static credentials)
-        turn_server_url = os.getenv("TURN_SERVER_URL")
-        turn_username = os.getenv("TURN_USERNAME")
-        turn_credential = os.getenv("TURN_CREDENTIAL")
-        stun_server_url = os.getenv("STUN_SERVER_URL")
+        from .config import ice_config
 
         ice_servers = []
 
         # STUN 서버 추가 (AWS coturn + Google 백업)
-        if stun_server_url:
-            ice_servers.append(RTCIceServer(urls=[stun_server_url]))
-            logger.info(f"✅ AWS STUN server configured: {stun_server_url}")
+        if ice_config.STUN_SERVER_URL:
+            ice_servers.append(RTCIceServer(urls=[ice_config.STUN_SERVER_URL]))
+            logger.info(f"✅ AWS STUN server configured: {ice_config.STUN_SERVER_URL}")
 
         # Google STUN 서버 (백업용)
-        ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
+        for stun_url in ice_config.DEFAULT_STUN_SERVERS:
+            ice_servers.append(RTCIceServer(urls=[stun_url]))
 
         # TURN 서버 추가 (AWS coturn)
-        if turn_server_url and turn_username and turn_credential:
+        if ice_config.has_turn_server:
             ice_servers.append(RTCIceServer(
-                urls=[turn_server_url],
-                username=turn_username,
-                credential=turn_credential
+                urls=[ice_config.TURN_SERVER_URL],
+                username=ice_config.TURN_USERNAME,
+                credential=ice_config.TURN_CREDENTIAL
             ))
-            logger.info(f"✅ AWS TURN server configured: {turn_server_url}")
-            logger.debug(f"TURN credentials - username: {turn_username}")
+            logger.info(f"✅ AWS TURN server configured: {ice_config.TURN_SERVER_URL}")
+            logger.debug(f"TURN credentials - username: {ice_config.TURN_USERNAME}")
         else:
-            logger.warning("⚠️ AWS TURN server credentials not found in .env - using STUN only")
+            logger.warning("⚠️ AWS TURN server credentials not found in config - using STUN only")
 
         # aiortc doesn't support iceTransportPolicy parameter
         # Use both TURN (preferred) and STUN (fallback) servers
@@ -836,7 +757,7 @@ class PeerConnectionManager:
 
                     # Call callback if set (with source identifier and is_final flag)
                     if self.on_transcript_callback and transcript.strip():
-                        await self.on_transcript_callback(peer_id, room_name, transcript, STT_ENGINE_GOOGLE, is_final)
+                        await self.on_transcript_callback(peer_id, room_name, transcript, connection_config.STT_ENGINE, is_final)
 
                 # Stream ended normally - restart it for continuous recognition
                 logger.info(f"🔄 STT stream ended normally for peer {peer_id}, restarting for continuous recognition...")

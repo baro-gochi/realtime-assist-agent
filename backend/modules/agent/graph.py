@@ -21,6 +21,7 @@ State Structure:
     - messages: MessagesState가 자동 관리하는 메시지 히스토리
 
 Example:
+    >>> from modules.agent import create_agent_graph
     >>> graph = create_agent_graph(llm)
     >>> async for chunk in graph.astream(
     ...     state,
@@ -194,6 +195,7 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
         - graph.astream(..., context={"system_message": "..."})로 전달
 
     Example:
+        >>> from modules.agent import create_agent_graph
         >>> graph = create_agent_graph(llm)
         >>> async for chunk in graph.astream(
         ...     state,
