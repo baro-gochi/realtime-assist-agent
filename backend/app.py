@@ -64,7 +64,7 @@ from pydantic import BaseModel
 from typing import Dict, Any
 import httpx
 
-from modules import PeerConnectionManager, RoomManager
+from modules import PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager, DatabaseLogHandler
 from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 from pathlib import Path
@@ -105,6 +105,11 @@ logger = logging.getLogger(__name__)
 peer_manager = PeerConnectionManager()
 room_manager = RoomManager()
 
+# Database and Redis managers (will be initialized in lifespan)
+db_manager = get_db_manager()
+redis_manager = get_redis_manager()
+db_log_handler: Optional[DatabaseLogHandler] = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -120,14 +125,55 @@ async def lifespan(app: FastAPI):
         None: 앱이 실행되는 동안 제어를 반환
 
     Note:
-        - 시작: 로깅 초기화 및 서버 시작 로그 기록
-        - 종료: 모든 피어 연결 정리 및 리소스 해제
+        - 시작: DB 초기화, 로그 핸들러 시작, 서버 시작
+        - 종료: 로그 핸들러 정지, DB 연결 종료, 피어 연결 정리
     """
+    global db_log_handler
+
     # Startup
     logger.info("Starting up WebRTC Signaling Server...")
+
+    # Initialize database connection
+    db_initialized = await db_manager.initialize()
+    if db_initialized:
+        logger.info("Database connection established")
+
+        # Start database log handler
+        db_log_handler = DatabaseLogHandler(level=logging.INFO)
+        logging.getLogger().addHandler(db_log_handler)
+        await db_log_handler.start()
+        logger.info("Database log handler started")
+    else:
+        logger.warning("Database not available, running without DB logging")
+
+    # Initialize Redis connection
+    redis_initialized = await redis_manager.initialize()
+    if redis_initialized:
+        logger.info("Redis connection established")
+    else:
+        logger.warning("Redis not available, running without Redis")
+
     yield
+
     # Shutdown
     logger.info("Shutting down server...")
+
+    # Stop database log handler
+    if db_log_handler:
+        await db_log_handler.stop()
+        logger.info("Database log handler stopped")
+
+    # Close Redis connection
+    if redis_manager.is_initialized:
+        await redis_manager.close()
+        logger.info("Redis connection closed")
+
+    # Close database connection
+    if db_manager.is_initialized:
+        await db_manager.close()
+        logger.info("Database connection closed")
+
+    # Cleanup peer connections
     await peer_manager.cleanup_all()
 
 
@@ -321,7 +367,7 @@ async def get_turn_credentials(_: bool = Depends(verify_auth_header)):
         "credential": turn_credential
     })
 
-    logger.info("✅ AWS coturn credentials provided to frontend")
+    logger.info("AWS coturn credentials provided to frontend")
     return ice_servers
 
 
@@ -367,25 +413,25 @@ async def rag_assist_proxy(
             response.raise_for_status()
             return response.json()
     except httpx.ConnectError:
-        logger.error(f"❌ RAG 서버 연결 실패: {RAG_SERVER_URL}")
+        logger.error(f"RAG server connection failed: {RAG_SERVER_URL}")
         raise HTTPException(
             status_code=503,
             detail=f"RAG 서버에 연결할 수 없습니다. ({RAG_SERVER_URL})"
         )
     except httpx.TimeoutException:
-        logger.error(f"❌ RAG 서버 타임아웃: {RAG_SERVER_URL}")
+        logger.error(f"RAG server timeout: {RAG_SERVER_URL}")
         raise HTTPException(
             status_code=504,
             detail="RAG 서버 응답 시간 초과"
         )
     except httpx.HTTPStatusError as e:
-        logger.error(f"❌ RAG 서버 오류: {e.response.status_code}")
+        logger.error(f"RAG server error: {e.response.status_code}")
         raise HTTPException(
             status_code=e.response.status_code,
             detail=f"RAG 서버 오류: {e.response.text}"
         )
     except Exception as e:
-        logger.error(f"❌ RAG 프록시 오류: {e}")
+        logger.error(f"RAG proxy error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"RAG 프록시 처리 중 오류: {str(e)}"
@@ -420,6 +466,83 @@ async def rag_health_check():
             "rag_server": RAG_SERVER_URL,
             "message": str(e)
         }
+
+
+@app.get("/api/health/db")
+async def db_health_check():
+    """PostgreSQL 데이터베이스 상태를 확인합니다.
+
+    Returns:
+        dict: DB 연결 상태 정보
+    """
+    db = get_db_manager()
+    if not db.is_initialized:
+        return {"status": "error", "message": "Database not initialized"}
+    try:
+        result = await db.fetchval("SELECT 1")
+        return {"status": "ok", "connected": result == 1}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/health/redis")
+async def redis_health_check():
+    """Redis 상태를 확인합니다.
+
+    Returns:
+        dict: Redis 연결 상태 정보
+    """
+    redis_mgr = get_redis_manager()
+    if not redis_mgr.is_initialized:
+        return {"status": "error", "message": "Redis not initialized"}
+    try:
+        pong = await redis_mgr.ping()
+        return {"status": "ok", "connected": pong}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/health")
+async def health_check():
+    """전체 서비스 상태를 확인합니다.
+
+    Returns:
+        dict: 모든 서비스 연결 상태 정보
+    """
+    db = get_db_manager()
+    redis_mgr = get_redis_manager()
+
+    db_status = "ok"
+    redis_status = "ok"
+
+    # Check DB
+    if not db.is_initialized:
+        db_status = "not_initialized"
+    else:
+        try:
+            await db.fetchval("SELECT 1")
+        except Exception:
+            db_status = "error"
+
+    # Check Redis
+    if not redis_mgr.is_initialized:
+        redis_status = "not_initialized"
+    else:
+        try:
+            if not await redis_mgr.ping():
+                redis_status = "error"
+        except Exception:
+            redis_status = "error"
+
+    overall = "ok" if db_status == "ok" and redis_status == "ok" else "degraded"
+
+    return {
+        "status": overall,
+        "services": {
+            "database": db_status,
+            "redis": redis_status,
+        }
+    }
 
 
 @app.websocket("/ws")
@@ -512,7 +635,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             - 트랙 전송자는 알림 대상에서 제외됨
             - PeerConnectionManager에서 on_track 이벤트 시 자동 호출됨
         """
-        logger.info(f"📡 Track received from {source_peer_id}: {track_kind}")
+        logger.info(f"Track received from {source_peer_id}: {track_kind}")
         # 같은 방의 다른 피어들에게 renegotiation 요청
         await broadcast_to_room(
             room_name,
@@ -535,7 +658,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
           # The candidate string already has "candidate:" prefix, don't add it again
 
           # DEBUG: Log the raw candidate object
-          logger.info(f"🔍 Raw candidate from aiortc: candidate={candidate.candidate}, sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
+          logger.info(f"Raw candidate from aiortc: candidate={candidate.candidate}, sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
 
           candidate_dict = {
               "candidate": candidate.candidate,  # Already has "candidate:" prefix
@@ -543,12 +666,12 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
               "sdpMLineIndex": candidate.sdpMLineIndex
           }
 
-          logger.info(f"📋 Converted candidate_dict: {candidate_dict}")
+          logger.info(f"Converted candidate_dict: {candidate_dict}")
 
           # Broadcast ICE candidate to ALL peers in the same room
           room_name = peer_manager.get_peer_room(source_peer_id)
           if room_name:
-              logger.info(f"📤 Broadcasting backend ICE candidate from {source_peer_id} to room '{room_name}'")
+              logger.info(f"Broadcasting backend ICE candidate from {source_peer_id} to room '{room_name}'")
               await room_manager.broadcast_to_room(
                   room_name,
                   {
@@ -559,7 +682,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
               )
           else:
               # Fallback: Send to source peer only if room not found
-              logger.warning(f"⚠️ Room not found for peer {source_peer_id}, sending ICE candidate to source only")
+              logger.warning(f"Room not found for peer {source_peer_id}, sending ICE candidate to source only")
               await websocket.send_json({"type": "ice_candidate", "data": candidate_dict})
 
     peer_manager.on_ice_candidate_callback = on_ice_candidate
@@ -581,7 +704,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             - 최종 결과만 LangGraph 에이전트 실행
         """
         result_type = "final" if is_final else "partial"
-        logger.info(f"💬 [{source.upper()}:{result_type}] Transcript from {peer_id} in room '{room_name}': {transcript}")
+        logger.info(f"[{source.upper()}:{result_type}] Transcript from {peer_id} in room '{room_name}': {transcript}")
 
         # Get peer nickname
         peer_info = room_manager.get_peer(peer_id)
@@ -609,41 +732,41 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             }
         )
 
-        # 🤖 LangGraph 에이전트 실행 (실시간 요약 생성)
+        # LangGraph 에이전트 실행 (실시간 요약 생성)
         # Skip agent for STT comparison room
         if room_name == "stt-comparison-room":
-            logger.debug(f"⏭️ Skipping agent for STT comparison room")
+            logger.debug(f"Skipping agent for STT comparison room")
             return
 
         # Only run agent for Google STT to avoid duplicate summaries
         if source != "google":
-            logger.debug(f"⏭️ Skipping agent for {source} source (only Google STT triggers agent)")
+            logger.debug(f"Skipping agent for {source} source (only Google STT triggers agent)")
             return
 
         try:
             agent = room_agents.get(room_name)
 
             if not agent:
-                logger.warning(f"⚠️ No agent found for room '{room_name}', skipping summary")
+                logger.warning(f"No agent found for room '{room_name}', skipping summary")
                 return
 
-            logger.info(f"🤖 Running agent for room '{room_name}'")
-            logger.info(f"📞 Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
+            logger.info(f"Running agent for room '{room_name}'")
+            logger.info(f"Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
 
             # 비스트리밍 모드로 에이전트 실행 (JSON 응답)
             result = await agent.on_new_transcript(peer_id, nickname, transcript, current_time)
 
             # 에러 체크
             if "error" in result:
-                logger.error(f"❌ Agent returned error: {result['error']}")
+                logger.error(f"Agent returned error: {result['error']}")
                 return
 
             # 결과 브로드캐스트 (JSON 형식의 요약)
             current_summary = result.get("current_summary", "")
             last_summarized_index = result.get("last_summarized_index", 0)
 
-            logger.info(f"📤 Broadcasting agent update with JSON summary")
-            logger.info(f"📊 Summary: {current_summary[:100]}...")
+            logger.info(f"Broadcasting agent update with JSON summary")
+            logger.info(f"Summary: {current_summary[:100]}...")
 
             await broadcast_to_room(
                 room_name,
@@ -656,10 +779,10 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     }
                 }
             )
-            logger.info(f"✅ Broadcast completed")
+            logger.info(f"Broadcast completed")
 
         except Exception as e:
-            logger.error(f"❌ Agent execution failed: {e}", exc_info=True)
+            logger.error(f"Agent execution failed: {e}", exc_info=True)
 
     peer_manager.on_transcript_callback = on_transcript
 
@@ -685,14 +808,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 room_manager.join_room(room_name, peer_id, nickname, websocket)
                 current_room = room_name
 
-                # 🤖 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
+                # 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
                 if room_name == "stt-comparison-room":
-                    logger.info(f"⏭️ Skipping agent creation for STT comparison room")
+                    logger.info(f"Skipping agent creation for STT comparison room")
                     agent = None
                 else:
-                    logger.info(f"🤖 Creating/getting agent for room '{room_name}'")
+                    logger.info(f"Creating/getting agent for room '{room_name}'")
                     agent = get_or_create_agent(room_name)
-                    logger.info(f"✅ Agent ready for room '{room_name}'")
+                    logger.info(f"Agent ready for room '{room_name}'")
 
                 # 에이전트 준비 완료 알림 전송 (STT 비교 룸은 제외)
                 if agent is not None:
@@ -822,9 +945,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
                         # Add to peer connection
                         await pc.addIceCandidate(ice_candidate)
-                        logger.info(f"  ✅ Added client ICE candidate to peer {peer_id[:8]}")
+                        logger.info(f"  Added client ICE candidate to peer {peer_id[:8]}")
                     except Exception as e:
-                        logger.error(f"  ❌ Failed to add ICE candidate: {e}")
+                        logger.error(f"  Failed to add ICE candidate: {e}")
 
                 # Broadcast ICE candidate to other peers in the room
                 await broadcast_to_room(

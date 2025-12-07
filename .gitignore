@@ -42,6 +42,12 @@ Thumbs.db
 # gcloud-keys
 gcloud-keys/*.json
 
-#data
-!data/.gitkeep
-data/
+# Database (keep docker-compose.yaml and init scripts)
+data/.env
+data/postgres_data/
+data/pgadmin_data/
+data/redis_data/
+
+# Transcripts (local file backups)
+data/transcripts/
+data/chroma_db/
