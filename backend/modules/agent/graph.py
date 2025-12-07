@@ -102,17 +102,17 @@ def create_summarize_node(llm: BaseChatModel):
                 "last_summarized_index": int
             }
         """
-        logger.info("🔵 summarize_node started (incremental mode)")
+        logger.info("summarize_node started (incremental mode)")
         conversation_history = state.get("conversation_history", [])
         last_summarized_index = state.get("last_summarized_index", 0)
         current_summary = state.get("current_summary", "")
 
         total_count = len(conversation_history)
-        logger.info(f"📚 Total history: {total_count}, Last summarized: {last_summarized_index}")
+        logger.info(f"Total history: {total_count}, Last summarized: {last_summarized_index}")
 
         # 새로운 transcript가 없으면 기존 요약 반환
         if last_summarized_index >= total_count:
-            logger.info("⏭️ No new transcripts, returning existing summary")
+            logger.info("No new transcripts, returning existing summary")
             return {
                 "current_summary": current_summary,
                 "last_summarized_index": last_summarized_index
@@ -120,7 +120,7 @@ def create_summarize_node(llm: BaseChatModel):
 
         # 새로운 transcript만 추출
         new_transcripts = conversation_history[last_summarized_index:]
-        logger.info(f"📝 Processing {len(new_transcripts)} new transcripts")
+        logger.info(f"Processing {len(new_transcripts)} new transcripts")
 
         # 새로운 대화를 텍스트로 포맷팅
         formatted_new = []
@@ -151,16 +151,16 @@ def create_summarize_node(llm: BaseChatModel):
         # Runtime Context에서 시스템 메시지 가져오기
         if (system_message := runtime.context.system_message):
             messages = [SystemMessage(system_message)] + messages
-            logger.info("📝 System message added from runtime context")
+            logger.info("System message added from runtime context")
 
         # LLM 호출 (스트리밍 없이 한 번에)
-        logger.info("⏳ Calling LLM for incremental summary...")
+        logger.info("Calling LLM for incremental summary...")
         try:
             response = await llm.ainvoke(messages)
             summary = response.content.strip()
-            logger.info(f"✅ Summary generated: {summary[:100]}...")
+            logger.info(f"Summary generated: {summary[:100]}...")
         except Exception as e:
-            logger.error(f"❌ LLM call failed: {e}")
+            logger.error(f"LLM call failed: {e}")
             # 에러 시 기존 요약 유지
             return {
                 "current_summary": current_summary,
@@ -223,6 +223,6 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
     # 컴파일
     compiled_graph = graph.compile()
 
-    logger.info("✅ Agent graph created and compiled with Runtime Context support")
+    logger.info("Agent graph created and compiled with Runtime Context support")
 
     return compiled_graph

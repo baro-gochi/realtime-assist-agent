@@ -69,13 +69,13 @@ class AudioRelayTrack(MediaStreamTrack):
             try:
                 # Debug: Log first frame
                 if not hasattr(self, '_first_frame_logged'):
-                    logger.info("🎤 AudioRelayTrack: First frame sent to STT queue!")
+                    logger.info("AudioRelayTrack: First frame sent to STT queue!")
                     self._first_frame_logged = True
 
                 self.stt_queue.put_nowait(frame)
             except asyncio.QueueFull:
                 # Skip frame if queue is full
-                logger.warning("⚠️ STT queue full, dropping audio frame")
+                logger.warning("STT queue full, dropping audio frame")
                 pass
 
         return frame

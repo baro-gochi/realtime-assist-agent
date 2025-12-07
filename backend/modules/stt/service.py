@@ -160,10 +160,10 @@ class STTService:
             api_endpoint = f"{self.location}-speech.googleapis.com"
             client_options = ClientOptions(api_endpoint=api_endpoint)
             self.client = SpeechClient(client_options=client_options)
-            logger.info(f"🌏 Using regional endpoint: {api_endpoint}")
+            logger.info(f"Using regional endpoint: {api_endpoint}")
         else:
             self.client = SpeechClient()
-            logger.info("🌐 Using global endpoint: speech.googleapis.com")
+            logger.info("Using global endpoint: speech.googleapis.com")
 
         # Recognizer path
         self.recognizer = f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
@@ -192,7 +192,7 @@ class STTService:
             try:
                 self.adaptation = get_default_adaptation()
                 if self.adaptation:
-                    logger.info("🎯 STT adaptation loaded from config")
+                    logger.info("STT adaptation loaded from config")
             except Exception as e:
                 logger.warning(f"Failed to load STT adaptation: {e}")
 
@@ -345,7 +345,7 @@ class STTService:
             """asyncio Queue에서 thread-safe Queue로 프레임 전송"""
             chunk_count = 0
             try:
-                logger.info("🎧 Starting frame transfer task...")
+                logger.info("Starting frame transfer task...")
                 while not stop_event.is_set():
                     frame = await audio_queue.get()
                     if frame is None:
@@ -355,7 +355,7 @@ class STTService:
 
                     chunk_count += 1
                     if chunk_count == 1:
-                        logger.info(f"✅ First audio frame received! Starting transfer...")
+                        logger.info(f"First audio frame received! Starting transfer...")
 
                     sync_queue.put(frame)
                 logger.info(f"Frame transfer completed. Total chunks: {chunk_count}")
@@ -369,13 +369,13 @@ class STTService:
         def generate_requests():
             """동기 요청 생성기 (v2 방식) - 250ms 청크 누적 전송"""
             # First request with recognizer and config
-            logger.info("📤 Sending initial config request to STT API...")
+            logger.info("Sending initial config request to STT API...")
             config_request = cloud_speech.StreamingRecognizeRequest(
                 recognizer=self.recognizer,
                 streaming_config=streaming_config,
             )
             yield config_request
-            logger.info("✅ Config request sent, waiting for audio frames...")
+            logger.info("Config request sent, waiting for audio frames...")
 
             # 250ms 청크 누적 방식
             frame_count = 0
@@ -404,7 +404,7 @@ class STTService:
                     mean_val = np.abs(combined_array).mean()
                     non_zero = np.count_nonzero(combined_array)
                     logger.info(
-                        f"🔊 Audio chunk #{chunk_count}: samples={len(combined_array)}, "
+                        f"Audio chunk #{chunk_count}: samples={len(combined_array)}, "
                         f"max={max_val}, mean={mean_val:.1f}, non_zero={non_zero}/{len(combined_array)}"
                     )
 
@@ -430,11 +430,11 @@ class STTService:
                         import time
                         silence_duration = time.time() - last_frame_time
                         if silence_duration > silence_threshold:
-                            logger.info(f"⏱️ No audio for {silence_duration:.1f}s, closing stream gracefully...")
+                            logger.info(f"No audio for {silence_duration:.1f}s, closing stream gracefully...")
                             break
                     elif frame_count == 0:
                         # No frames received at all after long wait
-                        logger.error(f"❌ No audio frames received after {first_frame_timeout}s timeout!")
+                        logger.error(f"No audio frames received after {first_frame_timeout}s timeout!")
                         break
                     continue
 
@@ -444,7 +444,7 @@ class STTService:
                         audio_bytes = process_accumulated_chunks()
                         if audio_bytes:
                             yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
-                    logger.info(f"🏁 Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
+                    logger.info(f"Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
                     break
 
                 # Update last frame time
@@ -453,21 +453,21 @@ class STTService:
 
                 frame_count += 1
                 if frame_count == 1:
-                    logger.info(f"🔍 AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
+                    logger.info(f"AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
 
                 # Convert frame to numpy array
                 array = frame.to_ndarray()
 
-                # 🔧 Handle stereo to mono conversion
+                # Handle stereo to mono conversion
                 if array.ndim > 1:
                     array = array.flatten()
 
                 if array.size == frame.samples * 2:
                     array = array.reshape(-1, 2).mean(axis=1).astype(array.dtype)
                     if frame_count == 1:
-                        logger.info(f"🔧 Converted stereo to mono")
+                        logger.info(f"Converted stereo to mono")
 
-                # 🔧 Handle audio format conversion
+                # Handle audio format conversion
                 if array.dtype == np.float32 or array.dtype == np.float64:
                     array = (array * 32767).astype(np.int16)
                 elif array.dtype == np.int16:
@@ -496,7 +496,7 @@ class STTService:
                             yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
 
                         if chunk_count % 200 == 0:  # ~50초마다 로그
-                            logger.info(f"📦 Sent {chunk_count} chunks to Google STT")
+                            logger.info(f"Sent {chunk_count} chunks to Google STT")
 
                     # 누적 초기화
                     accumulated_arrays = []
@@ -508,32 +508,32 @@ class STTService:
         def run_streaming_recognize():
             """동기 STT 호출을 스레드에서 실행"""
             try:
-                logger.info(f"🎙️ Starting streaming recognition with recognizer: {self.recognizer}")
-                logger.info(f"🔗 API endpoint: {self.client._transport._host if hasattr(self.client, '_transport') else 'unknown'}")
+                logger.info(f"Starting streaming recognition with recognizer: {self.recognizer}")
+                logger.info(f"API endpoint: {self.client._transport._host if hasattr(self.client, '_transport') else 'unknown'}")
 
-                logger.info("📡 Calling streaming_recognize()...")
+                logger.info("Calling streaming_recognize()...")
                 responses_iterator = self.client.streaming_recognize(
                     requests=generate_requests()
                 )
-                logger.info("📡 streaming_recognize() returned iterator, starting to iterate...")
+                logger.info("streaming_recognize() returned iterator, starting to iterate...")
 
-                logger.info("⏳ Waiting for first response from STT API...")
+                logger.info("Waiting for first response from STT API...")
 
                 response_count = 0
                 for response in responses_iterator:
                     if response_count == 0:
-                        logger.info("✅ STT stream connection established, first response received!")
+                        logger.info("STT stream connection established, first response received!")
                     else:
-                        logger.info(f"⏳ Received response after waiting...")
+                        logger.info(f"Received response after waiting...")
                     response_count += 1
-                    logger.info(f"📨 Received response #{response_count} from STT API")
+                    logger.info(f"Received response #{response_count} from STT API")
 
                     if not response.results:
-                        logger.info(f"📭 Response #{response_count} has no results (empty)")
+                        logger.info(f"Response #{response_count} has no results (empty)")
                         continue
 
                     result = response.results[0]
-                    logger.info(f"📬 Response #{response_count}: is_final={result.is_final}, alternatives={len(result.alternatives) if result.alternatives else 0}")
+                    logger.info(f"Response #{response_count}: is_final={result.is_final}, alternatives={len(result.alternatives) if result.alternatives else 0}")
 
                     if result.is_final or self.enable_interim_results:
                         if result.alternatives:
@@ -553,10 +553,10 @@ class STTService:
                                 "confidence": confidence
                             })
 
-                    logger.info(f"⏳ Waiting for response #{response_count + 1}...")
+                    logger.info(f"Waiting for response #{response_count + 1}...")
 
                 # Signal end of stream
-                logger.info(f"🏁 Response iterator ended. Total responses: {response_count}")
+                logger.info(f"Response iterator ended. Total responses: {response_count}")
                 result_queue.put(None)
 
             except Exception as e:
@@ -565,9 +565,9 @@ class STTService:
                 # 500 Internal error: 스트림 제한 시간 도달
                 if ("499" in str(e) or "CANCELLED" in str(e).upper() or
                     "500" in str(e) or "Internal error" in str(e)):
-                    logger.info(f"🔄 STT stream ended (normal behavior), will restart: {e}")
+                    logger.info(f"STT stream ended (normal behavior), will restart: {e}")
                 else:
-                    logger.error(f"❌ Unexpected STT error: {e}", exc_info=True)
+                    logger.error(f"Unexpected STT error: {e}", exc_info=True)
                 result_queue.put(None)
 
         try:

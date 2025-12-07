@@ -50,7 +50,7 @@ class RoomAgent:
             room_name (str): 방 이름
         """
         # LLM 인스턴스 초기화 (클래스 생성 시 실행)
-        logger.info(f"🤖 Initializing LLM: {llm_config.MODEL}")
+        logger.info(f"Initializing LLM: {llm_config.MODEL}")
 
         try:
             # TTFT 최적화: temperature=0 (Greedy Search)
@@ -81,9 +81,9 @@ class RoomAgent:
             {{"summary": "고객이 환불을 요청함", "customer_issue": "제품 불량으로 환불 요청", "agent_action": "환불 절차 안내"}}
             """
 
-            logger.info("✅ LLM initialized successfully")
+            logger.info("LLM initialized successfully")
         except Exception as e:
-            logger.error(f"❌ LLM initialization failed: {e}")
+            logger.error(f"LLM initialization failed: {e}")
             llm = None
             self.system_message = None
 
@@ -94,7 +94,7 @@ class RoomAgent:
             self.graph = create_agent_graph(llm)
         else:
             self.graph = None
-            logger.warning(f"⚠️ RoomAgent for '{room_name}' created without LLM - summaries will not be generated")
+            logger.warning(f"RoomAgent for '{room_name}' created without LLM - summaries will not be generated")
 
         self.state: ConversationState = {
             "room_name": room_name,
@@ -104,7 +104,7 @@ class RoomAgent:
             "messages": []  # MessagesState 필수 필드
         }
 
-        logger.info(f"🤖 RoomAgent created for room: {room_name}")
+        logger.info(f"RoomAgent created for room: {room_name}")
 
     async def on_new_transcript(
         self,
@@ -142,18 +142,18 @@ class RoomAgent:
         })
 
         logger.info(
-            f"📝 New transcript in room '{self.room_name}': "
+            f"New transcript in room '{self.room_name}': "
             f"{speaker_name}: {text[:50]}..."
         )
-        logger.info(f"📊 Current conversation history count: {len(self.state['conversation_history'])}")
+        logger.info(f"Current conversation history count: {len(self.state['conversation_history'])}")
 
         # LLM 없으면 요약 생성 스킵 (transcript는 이미 추가됨)
         if not self.llm_available:
-            logger.warning(f"⚠️ LLM not available - skipping summary generation for room '{self.room_name}'")
+            logger.warning(f"LLM not available - skipping summary generation for room '{self.room_name}'")
             return {"error": {"message": "LLM not available"}}
 
         # LangGraph 비스트리밍 실행 (Runtime Context로 시스템 메시지 전달)
-        logger.info(f"🚀 Starting graph.ainvoke for room '{self.room_name}'")
+        logger.info(f"Starting graph.ainvoke for room '{self.room_name}'")
 
         try:
             # ainvoke로 한 번에 결과 받기 (비스트리밍)
@@ -170,8 +170,8 @@ class RoomAgent:
             self.state["current_summary"] = current_summary
             self.state["last_summarized_index"] = last_summarized_index
 
-            logger.info(f"✅ Summary generated (JSON): {current_summary[:100]}...")
-            logger.info(f"📊 Last summarized index: {last_summarized_index}")
+            logger.info(f"Summary generated (JSON): {current_summary[:100]}...")
+            logger.info(f"Last summarized index: {last_summarized_index}")
 
             return {
                 "current_summary": current_summary,
@@ -179,7 +179,7 @@ class RoomAgent:
             }
 
         except Exception as e:
-            logger.error(f"❌ Error in agent execution: {e}", exc_info=True)
+            logger.error(f"Error in agent execution: {e}", exc_info=True)
             return {"error": {"message": str(e)}}
 
     def get_current_summary(self) -> str:
@@ -204,7 +204,7 @@ class RoomAgent:
         Note:
             방이 종료되거나 새로운 세션을 시작할 때 사용
         """
-        logger.info(f"🔄 Resetting agent for room: {self.room_name}")
+        logger.info(f"Resetting agent for room: {self.room_name}")
         self.state = {
             "room_name": self.room_name,
             "conversation_history": [],
@@ -235,9 +235,9 @@ def get_or_create_agent(room_name: str) -> RoomAgent:
     if room_name not in room_agents:
         agent = RoomAgent(room_name)
         room_agents[room_name] = agent
-        logger.info(f"✅ New agent created for room: {room_name}")
+        logger.info(f"New agent created for room: {room_name}")
     else:
-        logger.debug(f"♻️ Reusing existing agent for room: {room_name}")
+        logger.debug(f"Reusing existing agent for room: {room_name}")
 
     return room_agents[room_name]
 
@@ -254,9 +254,9 @@ def remove_agent(room_name: str):
     """
     if room_name in room_agents:
         del room_agents[room_name]
-        logger.info(f"🗑️ Agent removed for room: {room_name}")
+        logger.info(f"Agent removed for room: {room_name}")
     else:
-        logger.warning(f"⚠️ No agent found for room: {room_name}")
+        logger.warning(f"No agent found for room: {room_name}")
 
 
 def get_all_agents() -> Dict[str, RoomAgent]:

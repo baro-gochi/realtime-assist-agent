@@ -142,7 +142,7 @@ class PeerConnectionManager:
         room_name: str,
         other_peers_in_room: list
     ) -> RTCPeerConnection:
-        logger.info(f"▶ create_peer_connection: peer={peer_id[:8]}, room={room_name}, others={len(other_peers_in_room)}")
+        logger.info(f"create_peer_connection: peer={peer_id[:8]}, room={room_name}, others={len(other_peers_in_room)}")
         """룸의 피어를 위한 새로운 WebRTC 연결을 생성합니다.
 
         RTCPeerConnection을 생성하고 이벤트 핸들러를 등록합니다.
@@ -187,7 +187,7 @@ class PeerConnectionManager:
         # STUN 서버 추가 (AWS coturn + Google 백업)
         if ice_config.STUN_SERVER_URL:
             ice_servers.append(RTCIceServer(urls=[ice_config.STUN_SERVER_URL]))
-            logger.info(f"✅ AWS STUN server configured: {ice_config.STUN_SERVER_URL}")
+            logger.info(f"AWS STUN server configured: {ice_config.STUN_SERVER_URL}")
 
         # Google STUN 서버 (백업용)
         for stun_url in ice_config.DEFAULT_STUN_SERVERS:
@@ -200,10 +200,10 @@ class PeerConnectionManager:
                 username=ice_config.TURN_USERNAME,
                 credential=ice_config.TURN_CREDENTIAL
             ))
-            logger.info(f"✅ AWS TURN server configured: {ice_config.TURN_SERVER_URL}")
+            logger.info(f"AWS TURN server configured: {ice_config.TURN_SERVER_URL}")
             logger.debug(f"TURN credentials - username: {ice_config.TURN_USERNAME}")
         else:
-            logger.warning("⚠️ AWS TURN server credentials not found in config - using STUN only")
+            logger.warning("AWS TURN server credentials not found in config - using STUN only")
 
         # aiortc doesn't support iceTransportPolicy parameter
         # Use both TURN (preferred) and STUN (fallback) servers
@@ -214,7 +214,7 @@ class PeerConnectionManager:
         pc = RTCPeerConnection(configuration=config)
 
         # Force ICE gathering to wait by NOT calling setLocalDescription immediately
-        logger.info(f"  🔧 RTCPeerConnection created, TURN will allocate in background")
+        logger.info(f"  RTCPeerConnection created, TURN will allocate in background")
         self.peers[peer_id] = pc
         self.peer_rooms[peer_id] = room_name
 
@@ -224,7 +224,7 @@ class PeerConnectionManager:
             if candidate:
                 is_relay = "relay" in candidate.candidate.lower()
                 cand_type = "TURN" if is_relay else "host/srflx"
-                logger.info(f"  🔔 ICE candidate: type={cand_type}, peer={peer_id[:8]}")
+                logger.info(f"ICE candidate: type={cand_type}, peer={peer_id[:8]}")
 
                 if is_relay:
                     self.turn_candidate_received[peer_id] = True
@@ -232,7 +232,7 @@ class PeerConnectionManager:
                 if self.on_ice_candidate_callback:
                     await self.on_ice_candidate_callback(peer_id, candidate)
                 else:
-                    logger.warning(f"  ⚠️ Callback is None!")
+                    logger.warning(f"Callback is None!")
 
         @pc.on("iceconnectionstatechange")
         async def on_ice_connection_state_change():
@@ -310,10 +310,10 @@ class PeerConnectionManager:
             # Trigger renegotiation ONCE per peer (when first track arrives)
             if trigger_renegotiation and self.on_track_received_callback:
                 self.renegotiation_triggered[peer_id] = True
-                logger.info(f"🔔 Triggering renegotiation for peer {peer_id} (first track)")
+                logger.info(f"Triggering renegotiation for peer {peer_id} (first track)")
                 await self.on_track_received_callback(peer_id, room_name, track.kind)
             elif not trigger_renegotiation:
-                logger.info(f"⏭️ Skipping renegotiation trigger (already triggered for {peer_id})")
+                logger.info(f"Skipping renegotiation trigger (already triggered for {peer_id})")
 
             @track.on("ended")
             async def on_ended():
@@ -380,7 +380,7 @@ class PeerConnectionManager:
         offer: dict,
         other_peers_in_room: list
     ) -> dict:
-        logger.info(f"▶ handle_offer: peer={peer_id[:8]}, room={room_name}")
+        logger.info(f"handle_offer: peer={peer_id[:8]}, room={room_name}")
         """WebRTC offer를 처리하고 answer를 생성합니다.
 
         클라이언트로부터 받은 WebRTC offer를 처리하여 피어 연결을 설정하고,
@@ -432,23 +432,23 @@ class PeerConnectionManager:
         # Check if this is a renegotiation (peer connection already exists)
         if peer_id in self.peers:
             pc = self.peers[peer_id]
-            logger.info(f"🔄 Renegotiating existing connection for {peer_id}")
+            logger.info(f"Renegotiating existing connection for {peer_id}")
 
             # Get currently added track IDs to avoid duplicates
             current_senders = pc.getSenders()
-            logger.info(f"🔍 Renegotiation: PC state before - signaling={pc.signalingState}, connection={pc.connectionState}")
-            logger.info(f"🔍 Current senders count: {len(current_senders)}")
+            logger.info(f"Renegotiation: PC state before - signaling={pc.signalingState}, connection={pc.connectionState}")
+            logger.info(f"Current senders count: {len(current_senders)}")
             current_track_ids = set()
             for sender in current_senders:
                 if sender.track:
                     track_id = sender.track.id
                     if track_id is not None:
                         current_track_ids.add(track_id)
-                        logger.debug(f"   Sender track: {track_id}")
+                        logger.debug(f"Sender track: {track_id}")
                     else:
-                        logger.warning(f"   ⚠️ Sender has track with None id")
+                        logger.warning(f"Sender has track with None id")
                 else:
-                    logger.debug(f"   Sender has no track")
+                    logger.debug(f"Sender has no track")
             logger.info(f"Current tracks in connection: {len(current_track_ids)}")
 
             # CRITICAL FIX: Do NOT add tracks during renegotiation!
@@ -463,15 +463,15 @@ class PeerConnectionManager:
                     RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
                 )
             except Exception as sdp_error:
-                logger.error(f"❌ Failed to set remote description during renegotiation: {sdp_error}")
+                logger.error(f"Failed to set remote description during renegotiation: {sdp_error}")
                 raise
 
-            logger.info(f"🔍 After setRemoteDescription: signaling={pc.signalingState}")
+            logger.info(f"After setRemoteDescription: signaling={pc.signalingState}")
 
             # If state is already stable, setRemoteDescription handled the offer internally
             # This can happen when aiortc determines no actual changes are needed
             if pc.signalingState == "stable":
-                logger.info(f"⚡ Signaling already stable - no answer needed, returning current local description")
+                logger.info(f"Signaling already stable - no answer needed, returning current local description")
                 # Return the existing local description (already has answer set)
                 if pc.localDescription:
                     return {
@@ -480,27 +480,27 @@ class PeerConnectionManager:
                     }
                 else:
                     # Edge case: no local description, need to create one
-                    logger.warning("⚠️ No local description in stable state, cannot create answer")
+                    logger.warning("No local description in stable state, cannot create answer")
                     raise ValueError("Cannot create answer: signaling state is stable but no local description")
 
             # CRITICAL: Create answer IMMEDIATELY - do not wait!
             # The signaling state can change during async waits, causing "None is not in list" errors
             # ICE gathering will happen asynchronously after answer is created
-            logger.info(f"📝 Creating answer immediately (signaling={pc.signalingState})")
+            logger.info(f"Creating answer immediately (signaling={pc.signalingState})")
 
             # Create answer (includes newly added tracks)
             try:
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                logger.info(f"✅ Answer created and local description set")
+                logger.info(f"Answer created and local description set")
             except Exception as answer_error:
-                logger.error(f"❌ Failed to create/set answer during renegotiation: {answer_error}")
+                logger.error(f"Failed to create/set answer during renegotiation: {answer_error}")
                 logger.error(f"   PC state: signaling={pc.signalingState}, connection={pc.connectionState}")
                 raise
 
             # Log ICE gathering state
             candidate_count = pc.localDescription.sdp.count("a=candidate:")
-            logger.info(f"  📊 [Renego] After setLocalDescription: gathering={pc.iceGatheringState}, candidates={candidate_count}")
+            logger.info(f"  [Renego] After setLocalDescription: gathering={pc.iceGatheringState}, candidates={candidate_count}")
 
             return {
                 "sdp": pc.localDescription.sdp,
@@ -508,7 +508,7 @@ class PeerConnectionManager:
             }
 
         # Initial connection case - create new peer connection
-        logger.info(f"🆕 Creating new peer connection for {peer_id}")
+        logger.info(f"Creating new peer connection for {peer_id}")
         pc = await self.create_peer_connection(peer_id, room_name, other_peers_in_room)
 
         # Add audio tracks from other peers in the room
@@ -528,18 +528,18 @@ class PeerConnectionManager:
         )
 
         # Create answer
-        logger.info(f"  📝 Creating answer...")
+        logger.info(f"  Creating answer...")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
         candidate_count = pc.localDescription.sdp.count("a=candidate:")
-        logger.info(f"  📊 SDP has {candidate_count} candidates, gathering={pc.iceGatheringState}")
+        logger.info(f"  SDP has {candidate_count} candidates, gathering={pc.iceGatheringState}")
 
         # NOTE: aiortc doesn't fire on("icecandidate") for candidates after gathering completes
         # TURN allocation happens in background but won't trigger events
         # We just send the answer - client will use STUN/host candidates
         # Connection should still work via STUN reflexive candidates
-        logger.info(f"  ✅ Sending answer (TURN may complete later)")
+        logger.info(f"  Sending answer (TURN may complete later)")
 
         return {
             "sdp": pc.localDescription.sdp,
@@ -656,7 +656,7 @@ class PeerConnectionManager:
             - 트랙이 종료되거나 에러 발생 시 자동으로 종료됩니다
             - 피어가 연결 해제되면 자동으로 정리됩니다
         """
-        logger.info(f"🎧 Starting audio track consumer for peer {peer_id}")
+        logger.info(f"Starting audio track consumer for peer {peer_id}")
         frame_count = 0
         try:
             while True:
@@ -665,16 +665,16 @@ class PeerConnectionManager:
                 frame_count += 1
 
                 if frame_count == 1:
-                    logger.info(f"✅ First frame consumed from peer {peer_id}")
+                    logger.info(f"First frame consumed from peer {peer_id}")
                 elif frame_count % 500 == 0:
                     logger.debug(f"Consumed {frame_count} frames from peer {peer_id}")
 
         except asyncio.CancelledError:
-            logger.info(f"📡 Audio consumer task cancelled for peer {peer_id}")
+            logger.info(f"Audio consumer task cancelled for peer {peer_id}")
         except Exception as e:
-            logger.error(f"❌ Audio track consumer error for peer {peer_id}: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"Audio track consumer error for peer {peer_id}: {type(e).__name__}: {e}", exc_info=True)
         finally:
-            logger.info(f"🏁 Audio track consumer ended for peer {peer_id}. Total frames: {frame_count}")
+            logger.info(f"Audio track consumer ended for peer {peer_id}. Total frames: {frame_count}")
 
     async def _start_stt_processing(self, peer_id: str, room_name: str):
         """피어의 오디오 스트림에 대한 STT 처리를 시작합니다.
@@ -711,7 +711,7 @@ class PeerConnectionManager:
         )
         self.stt_tasks[peer_id] = task
 
-        logger.info(f"🎤 Started STT processing for peer {peer_id} in room '{room_name}'")
+        logger.info(f"Started STT processing for peer {peer_id} in room '{room_name}'")
 
     async def _process_stt_for_peer(
         self,
@@ -745,7 +745,7 @@ class PeerConnectionManager:
 
         while retry_count < max_retries:
             try:
-                logger.info(f"🎤 Starting STT stream #{retry_count + 1} for peer {peer_id}")
+                logger.info(f"Starting STT stream #{retry_count + 1} for peer {peer_id}")
 
                 async for result in stt_service.process_audio_stream(audio_queue):
                     transcript = result.get("transcript", "")
@@ -753,19 +753,19 @@ class PeerConnectionManager:
                     confidence = result.get("confidence", 0.0)
 
                     result_type = "FINAL" if is_final else "INTERIM"
-                    logger.info(f"💬 Google STT {result_type} from peer {peer_id}: {transcript} (confidence: {confidence:.2f})")
+                    logger.info(f"Google STT {result_type} from peer {peer_id}: {transcript} (confidence: {confidence:.2f})")
 
                     # Call callback if set (with source identifier and is_final flag)
                     if self.on_transcript_callback and transcript.strip():
                         await self.on_transcript_callback(peer_id, room_name, transcript, connection_config.STT_ENGINE, is_final)
 
                 # Stream ended normally - restart it for continuous recognition
-                logger.info(f"🔄 STT stream ended normally for peer {peer_id}, restarting for continuous recognition...")
+                logger.info(f"STT stream ended normally for peer {peer_id}, restarting for continuous recognition...")
 
                 # 큐에 남은 프레임 유지 (버퍼링) - 새 스트림에서 처리
                 queue_size = audio_queue.qsize()
                 if queue_size > 0:
-                    logger.info(f"📦 Preserving {queue_size} buffered frames for new stream")
+                    logger.info(f"Preserving {queue_size} buffered frames for new stream")
 
                 # 빠르게 재시작 (지연 최소화)
                 await asyncio.sleep(0.05)
@@ -786,7 +786,7 @@ class PeerConnectionManager:
                 # Check if it's a timeout error
                 if "timeout" in error_msg.lower() or "409" in error_msg:
                     logger.warning(
-                        f"⏱️ STT stream timeout for peer {peer_id} "
+                        f"STT stream timeout for peer {peer_id} "
                         f"(attempt {retry_count}/{max_retries}). "
                         f"Restarting stream..."
                     )
@@ -795,7 +795,7 @@ class PeerConnectionManager:
                     # The old frames are stale and will cause the new stream to timeout too
                     queue_size = audio_queue.qsize()
                     if queue_size > 0:
-                        logger.info(f"🧹 Clearing {queue_size} stale frames from audio queue")
+                        logger.info(f"Clearing {queue_size} stale frames from audio queue")
                         while not audio_queue.empty():
                             try:
                                 audio_queue.get_nowait()
@@ -819,7 +819,7 @@ class PeerConnectionManager:
                     continue
 
         if retry_count >= max_retries:
-            logger.error(f"❌ Max STT retries reached for peer {peer_id}")
+            logger.error(f"Max STT retries reached for peer {peer_id}")
 
     async def _stop_stt_processing(self, peer_id: str):
         """피어의 STT 처리를 중지합니다.

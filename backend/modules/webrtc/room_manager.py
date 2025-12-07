@@ -9,10 +9,12 @@
     - 참가자 입장/퇴장 관리
     - 룸별 참가자 목록 조회
     - 룸 상태 모니터링 (참가자 수, 참가자 정보)
+    - PostgreSQL 데이터베이스 연동 (대화 내용 영구 저장)
 
 Architecture:
     - rooms: Dict[str, Dict[str, Peer]] - 룸 이름 → 참가자 맵
     - peer_to_room: Dict[str, str] - 참가자 ID → 룸 이름 (빠른 조회용)
+    - room_db_ids: Dict[str, UUID] - 룸 이름 → DB UUID 매핑
 
 Classes:
     Peer: 참가자 정보를 담는 데이터 클래스
@@ -27,12 +29,15 @@ Examples:
 
 See Also:
     peer_manager.py: WebRTC 연결 관리
+    database/: PostgreSQL 데이터베이스 연동
 """
+import asyncio
 import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from dataclasses import dataclass
+from uuid import UUID
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -114,6 +119,7 @@ class RoomManager:
         """RoomManager 초기화.
 
         빈 룸 딕셔너리와 피어-룸 매핑 딕셔너리를 생성합니다.
+        DB repository는 lazy import로 초기화합니다.
         """
         # room_name -> {peer_id: Peer}
         self.rooms: Dict[str, Dict[str, Peer]] = {}
@@ -121,17 +127,41 @@ class RoomManager:
         # peer_id -> room_name (for quick lookup)
         self.peer_to_room: Dict[str, str] = {}
 
-        # room_name -> List[TranscriptEntry] (대화 내용 저장)
+        # room_name -> List[TranscriptEntry] (대화 내용 저장 - 메모리)
         self.room_transcripts: Dict[str, List[TranscriptEntry]] = {}
 
         # room_name -> start_timestamp (방 시작 시간)
         self.room_start_times: Dict[str, float] = {}
+
+        # room_name -> DB UUID (DB 룸 ID 매핑)
+        self.room_db_ids: Dict[str, UUID] = {}
+
+        # DB repositories (lazy init)
+        self._room_repo = None
+        self._transcript_repo = None
+
+    @property
+    def room_repo(self):
+        """RoomRepository 인스턴스 (lazy init)."""
+        if self._room_repo is None:
+            from ..database import RoomRepository
+            self._room_repo = RoomRepository()
+        return self._room_repo
+
+    @property
+    def transcript_repo(self):
+        """TranscriptRepository 인스턴스 (lazy init)."""
+        if self._transcript_repo is None:
+            from ..database import TranscriptRepository
+            self._transcript_repo = TranscriptRepository()
+        return self._transcript_repo
 
     def create_room(self, room_name: str) -> None:
         """새로운 룸을 생성합니다.
 
         지정된 이름의 룸이 존재하지 않으면 빈 룸을 생성합니다.
         이미 존재하는 경우 아무 작업도 수행하지 않습니다.
+        DB 저장은 백그라운드에서 비동기로 실행됩니다.
 
         Args:
             room_name (str): 생성할 룸의 이름
@@ -139,6 +169,7 @@ class RoomManager:
         Note:
             - 일반적으로 직접 호출되지 않고 join_room()에서 자동으로 호출됨
             - 동일한 이름의 룸이 이미 존재하면 무시됨
+            - DB 저장은 비동기로 백그라운드 실행
 
         Examples:
             >>> manager = RoomManager()
@@ -151,11 +182,25 @@ class RoomManager:
             self.room_start_times[room_name] = datetime.now().timestamp()
             logger.info(f"Room '{room_name}' created")
 
+            # DB에 룸 생성 (백그라운드)
+            asyncio.create_task(self._save_room_to_db(room_name))
+
+    async def _save_room_to_db(self, room_name: str):
+        """룸을 DB에 저장합니다 (내부 메서드)."""
+        try:
+            room_id = await self.room_repo.create_room(room_name)
+            if room_id:
+                self.room_db_ids[room_name] = room_id
+                logger.debug(f"Room '{room_name}' saved to DB with id: {room_id}")
+        except Exception as e:
+            logger.error(f"Failed to save room to DB: {e}")
+
     def join_room(self, room_name: str, peer_id: str, nickname: str, websocket: WebSocket) -> None:
         """피어를 지정된 룸에 추가합니다.
 
         룸이 존재하지 않으면 자동으로 생성한 후 피어를 추가합니다.
         피어 정보는 룸의 참가자 목록과 피어-룸 매핑에 모두 저장됩니다.
+        DB 저장은 백그라운드에서 비동기로 실행됩니다.
 
         Args:
             room_name (str): 참가할 룸의 이름
@@ -167,6 +212,7 @@ class RoomManager:
             - 룸이 없으면 자동으로 생성됨
             - 동일한 peer_id로 다시 참가하면 기존 정보를 덮어씀
             - 참가 후 룸의 현재 참가자 수가 로그에 기록됨
+            - DB 저장은 비동기로 백그라운드 실행
 
         Examples:
             >>> manager = RoomManager()
@@ -188,11 +234,24 @@ class RoomManager:
         logger.info(f"Peer '{nickname}' ({peer_id}) joined room '{room_name}'. "
                    f"Room has {len(self.rooms[room_name])} peers")
 
+        # DB에 참가자 저장 (백그라운드)
+        asyncio.create_task(self._save_peer_to_db(room_name, peer_id, nickname))
+
+    async def _save_peer_to_db(self, room_name: str, peer_id: str, nickname: str):
+        """참가자를 DB에 저장합니다 (내부 메서드)."""
+        try:
+            room_db_id = self.room_db_ids.get(room_name)
+            if room_db_id:
+                await self.room_repo.add_peer(room_db_id, peer_id, nickname)
+        except Exception as e:
+            logger.error(f"Failed to save peer to DB: {e}")
+
     def leave_room(self, peer_id: str) -> Optional[str]:
         """피어를 현재 속한 룸에서 제거합니다.
 
         피어를 룸의 참가자 목록과 피어-룸 매핑에서 모두 제거합니다.
         룸이 비어있게 되면 자동으로 삭제합니다.
+        DB에도 퇴장 정보가 기록됩니다.
 
         Args:
             peer_id (str): 퇴장할 피어의 고유 ID
@@ -204,6 +263,7 @@ class RoomManager:
         Note:
             - 마지막 참가자가 퇴장하면 룸이 자동으로 삭제됨
             - 존재하지 않는 피어 ID를 제거하려고 하면 None을 반환
+            - DB에 피어 퇴장 시간 및 룸 종료 시간이 기록됨
 
         Examples:
             >>> manager = RoomManager()
@@ -225,15 +285,24 @@ class RoomManager:
         if room_name in self.rooms and peer_id in self.rooms[room_name]:
             peer = self.rooms[room_name][peer_id]
             nickname = peer.nickname
+            room_db_id = self.room_db_ids.get(room_name)
 
             # Remove peer
             del self.rooms[room_name][peer_id]
             del self.peer_to_room[peer_id]
 
+            # DB에 피어 퇴장 기록 (백그라운드)
+            if room_db_id:
+                asyncio.create_task(self._remove_peer_from_db(room_db_id, peer_id))
+
             # Delete room if empty
             if not self.rooms[room_name]:
                 # Save transcript to file before deleting room
                 self._save_transcript_to_file(room_name)
+
+                # DB에 룸 종료 기록 (백그라운드)
+                if room_db_id:
+                    asyncio.create_task(self._end_room_in_db(room_db_id, room_name))
 
                 # Clean up agent for this room (lazy import to avoid circular dependency)
                 from ..agent import remove_agent
@@ -245,6 +314,8 @@ class RoomManager:
                     del self.room_transcripts[room_name]
                 if room_name in self.room_start_times:
                     del self.room_start_times[room_name]
+                if room_name in self.room_db_ids:
+                    del self.room_db_ids[room_name]
 
                 logger.info(f"Room '{room_name}' deleted (empty)")
             else:
@@ -254,6 +325,21 @@ class RoomManager:
             return room_name
 
         return None
+
+    async def _remove_peer_from_db(self, room_db_id: UUID, peer_id: str):
+        """피어 퇴장을 DB에 기록합니다 (내부 메서드)."""
+        try:
+            await self.room_repo.remove_peer(room_db_id, peer_id)
+        except Exception as e:
+            logger.error(f"Failed to remove peer from DB: {e}")
+
+    async def _end_room_in_db(self, room_db_id: UUID, room_name: str):
+        """룸 종료를 DB에 기록합니다 (내부 메서드)."""
+        try:
+            await self.room_repo.end_room(room_db_id)
+            logger.debug(f"Room '{room_name}' marked as ended in DB")
+        except Exception as e:
+            logger.error(f"Failed to end room in DB: {e}")
 
     def get_room_peers(self, room_name: str) -> List[Peer]:
         """특정 룸의 모든 피어 목록을 반환합니다.
@@ -410,14 +496,26 @@ class RoomManager:
         """
         return len(self.rooms.get(room_name, {}))
 
-    def add_transcript(self, peer_id: str, room_name: str, text: str, timestamp: Optional[float] = None):
+    def add_transcript(
+        self,
+        peer_id: str,
+        room_name: str,
+        text: str,
+        timestamp: Optional[float] = None,
+        source: str = "google",
+        is_final: bool = True
+    ):
         """대화 내용을 룸의 transcript 히스토리에 추가합니다.
+
+        메모리와 DB 모두에 저장됩니다.
 
         Args:
             peer_id (str): 발화자의 피어 ID
             room_name (str): 룸 이름
             text (str): 발화 내용
             timestamp (float, optional): 발화 시간. None이면 현재 시간 사용
+            source (str): STT 소스 (기본값: google)
+            is_final (bool): 최종 결과 여부 (기본값: True)
 
         Examples:
             >>> manager = RoomManager()
@@ -443,6 +541,39 @@ class RoomManager:
         )
         self.room_transcripts[room_name].append(entry)
         logger.debug(f"Added transcript to room '{room_name}': {nickname}: {text}")
+
+        # DB에 대화 내용 저장 (백그라운드)
+        room_db_id = self.room_db_ids.get(room_name)
+        if room_db_id:
+            asyncio.create_task(
+                self._save_transcript_to_db(
+                    room_db_id, peer_id, nickname, text, timestamp, source, is_final
+                )
+            )
+
+    async def _save_transcript_to_db(
+        self,
+        room_db_id: UUID,
+        peer_id: str,
+        nickname: str,
+        text: str,
+        timestamp: float,
+        source: str,
+        is_final: bool
+    ):
+        """대화 내용을 DB에 저장합니다 (내부 메서드)."""
+        try:
+            await self.transcript_repo.add_transcript(
+                room_id=room_db_id,
+                peer_id=peer_id,
+                nickname=nickname,
+                text=text,
+                timestamp=timestamp,
+                source=source,
+                is_final=is_final
+            )
+        except Exception as e:
+            logger.error(f"Failed to save transcript to DB: {e}")
 
     def _save_transcript_to_file(self, room_name: str):
         """룸의 대화 내용을 텍스트 파일로 저장합니다.
@@ -488,6 +619,6 @@ class RoomManager:
                     time_str = msg_time.strftime('%H:%M:%S')
                     f.write(f"{entry.nickname} [{time_str}]: {entry.text}\n")
 
-            logger.info(f"💾 Saved transcript for room '{room_name}' to {filepath} ({len(transcripts)} messages)")
+            logger.info(f"Saved transcript for room '{room_name}' to {filepath} ({len(transcripts)} messages)")
         except Exception as e:
             logger.error(f"Failed to save transcript for room '{room_name}': {e}")

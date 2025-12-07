@@ -344,7 +344,7 @@ class STTAdaptationConfig:
         class_count = len(custom_classes)
         item_count = sum(len(cc.items) for cc in self.custom_classes)
         logger.info(
-            f"✅ STT adaptation configured: "
+            f"STT adaptation configured: "
             f"{phrase_count} phrases, {class_count} custom classes ({item_count} items)"
         )
 
@@ -440,7 +440,7 @@ class STTAdaptationConfig:
         with open(file_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        logger.info(f"📖 Loaded STT adaptation config from: {path}")
+        logger.info(f"Loaded STT adaptation config from: {path}")
         return cls.from_dict(data)
 
     @classmethod
@@ -463,7 +463,7 @@ class STTAdaptationConfig:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        logger.info(f"📖 Loaded STT adaptation config from: {path}")
+        logger.info(f"Loaded STT adaptation config from: {path}")
         return cls.from_dict(data)
 
     def to_dict(self) -> Dict[str, Any]:
