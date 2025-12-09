@@ -752,8 +752,7 @@ class PeerConnectionManager:
                     is_final = result.get("is_final", True)
                     confidence = result.get("confidence", 0.0)
 
-                    result_type = "FINAL" if is_final else "INTERIM"
-                    logger.info(f"Google STT {result_type} from peer {peer_id}: {transcript} (confidence: {confidence:.2f})")
+                    logger.info(f"Google STT FINAL from peer {peer_id}: {transcript} (confidence: {confidence:.2f})")
 
                     # Call callback if set (with source identifier and is_final flag)
                     if self.on_transcript_callback and transcript.strip():

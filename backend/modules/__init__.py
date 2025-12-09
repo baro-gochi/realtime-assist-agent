@@ -7,6 +7,8 @@ Modules:
     stt: Google Cloud Speech-to-Text 음성 인식
     agent: LangGraph 기반 대화 요약 에이전트
     database: PostgreSQL 데이터베이스 연동
+    vector_db: ChromaDB 벡터 데이터베이스 관리
+    consultation: RAG 기반 상담 지원 에이전트
 """
 
 from .webrtc import PeerConnectionManager, RoomManager, AudioRelayTrack
@@ -22,6 +24,28 @@ from .database import (
     SystemLogRepository,
     DatabaseLogHandler,
 )
+from .vector_db import (
+    VectorDBManager,
+    get_vector_db_manager,
+    reset_vector_db_manager,
+    DocumentRegistry,
+    get_doc_registry,
+    reset_doc_registry,
+)
+from .consultation import (
+    # Workflow functions
+    run_consultation,
+    run_consultation_async,
+    # API routers
+    consultation_router,
+    comparison_router,
+    faq_router,
+    # Config
+    consultation_settings,
+    # Utils
+    request_limiter,
+    get_queue_status,
+)
 
 __all__ = [
     # WebRTC
@@ -31,7 +55,7 @@ __all__ = [
     # STT
     "STTService",
     "STTAdaptationConfig",
-    # Agent
+    # Agent (real-time summarization)
     "create_agent_graph",
     "get_or_create_agent",
     "remove_agent",
@@ -45,4 +69,20 @@ __all__ = [
     "TranscriptRepository",
     "SystemLogRepository",
     "DatabaseLogHandler",
+    # Vector DB
+    "VectorDBManager",
+    "get_vector_db_manager",
+    "reset_vector_db_manager",
+    "DocumentRegistry",
+    "get_doc_registry",
+    "reset_doc_registry",
+    # Consultation (RAG-based support)
+    "run_consultation",
+    "run_consultation_async",
+    "consultation_router",
+    "comparison_router",
+    "faq_router",
+    "consultation_settings",
+    "request_limiter",
+    "get_queue_status",
 ]

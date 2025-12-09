@@ -80,13 +80,6 @@ class RecognitionConfig:
         )
     )
 
-    # 중간 결과 (실시간 표시용)
-    ENABLE_INTERIM_RESULTS: bool = field(
-        default_factory=lambda: _parse_bool(
-            os.getenv("STT_ENABLE_INTERIM_RESULTS"), default=True
-        )
-    )
-
     # Adaptation (PhraseSet/CustomClass) 활성화
     ENABLE_ADAPTATION: bool = field(
         default_factory=lambda: _parse_bool(

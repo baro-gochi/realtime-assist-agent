@@ -65,6 +65,7 @@ from typing import Dict, Any
 import httpx
 
 from modules import PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager, DatabaseLogHandler
+from modules import consultation_router, comparison_router, faq_router
 from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 from pathlib import Path
@@ -187,6 +188,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include consultation module routers (RAG-based consultation support)
+app.include_router(consultation_router, prefix="/api")
+app.include_router(comparison_router, prefix="/api")
+app.include_router(faq_router, prefix="/api")
 
 
 class SignalingMessage(BaseModel):
@@ -696,15 +702,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             room_name (str): 피어가 속한 룸 이름
             transcript (str): 인식된 텍스트
             source (str): STT 엔진 소스
-            is_final (bool): 최종 결과 여부 (False면 partial/interim)
+            is_final (bool): 최종 결과 여부
 
         Note:
             - 같은 룸의 모든 피어에게 브로드캐스트
             - 메시지 형식: {"type": "transcript", "data": {...}}
             - 최종 결과만 LangGraph 에이전트 실행
         """
-        result_type = "final" if is_final else "partial"
-        logger.info(f"[{source.upper()}:{result_type}] Transcript from {peer_id} in room '{room_name}': {transcript}")
+        logger.info(f"[{source.upper()}] Transcript from {peer_id} in room '{room_name}': {transcript}")
 
         # Get peer nickname
         peer_info = room_manager.get_peer(peer_id)

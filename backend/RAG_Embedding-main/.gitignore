@@ -1,0 +1,11 @@
+# 디렉터리
+docs_data
+.claude
+chroma_db*
+
+
+# 파일
+.env
+*.txt
+src/test.py
+*.html

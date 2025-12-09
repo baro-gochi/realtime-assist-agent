@@ -8,6 +8,7 @@ asyncpg와 redis-py를 사용하여 고성능 비동기 DB 작업을 지원합�
     - Redis 연결 관리
     - 룸/참가자/대화 내용 저장
     - 시스템 로그 DB 저장
+    - KT 멤버십 FAQ 캐싱 및 검색
 """
 
 from .connection import DatabaseManager, get_db_manager
@@ -18,6 +19,7 @@ from .repository import (
     SystemLogRepository,
 )
 from .log_handler import DatabaseLogHandler
+from .faq_service import FAQService, get_faq_service
 
 __all__ = [
     "DatabaseManager",
@@ -28,4 +30,6 @@ __all__ = [
     "TranscriptRepository",
     "SystemLogRepository",
     "DatabaseLogHandler",
+    "FAQService",
+    "get_faq_service",
 ]

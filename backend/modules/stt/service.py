@@ -75,7 +75,6 @@ class STTService:
         language_codes (List[str]): 음성 인식 언어 코드 리스트
         model (str): 사용할 음성 인식 모델
         enable_automatic_punctuation (bool): 자동 구두점 추가 여부
-        enable_interim_results (bool): 중간 결과 활성화 여부
         enable_adaptation (bool): 음성 적응(PhraseSet/CustomClass) 활성화 여부
         adaptation (SpeechAdaptation): 음성 적응 설정 객체
 
@@ -103,7 +102,6 @@ class STTService:
         language_codes: Optional[List[str]] = None,
         model: Optional[str] = None,
         enable_automatic_punctuation: Optional[bool] = None,
-        enable_interim_results: Optional[bool] = None,
         enable_adaptation: Optional[bool] = None,
     ):
         """STTService 초기화.
@@ -117,8 +115,6 @@ class STTService:
                 환경 변수 STT_MODEL 또는 "chirp" 사용
             enable_automatic_punctuation (bool, optional): 자동 구두점 추가.
                 환경 변수 STT_ENABLE_AUTOMATIC_PUNCTUATION 또는 True 사용
-            enable_interim_results (bool, optional): 중간 결과 활성화.
-                환경 변수 STT_ENABLE_INTERIM_RESULTS 또는 False 사용
             enable_adaptation (bool, optional): 음성 적응(PhraseSet/CustomClass) 활성화.
                 환경 변수 STT_ENABLE_ADAPTATION 또는 True 사용.
                 stt_phrases.yaml 파일이 있으면 자동 로드.
@@ -174,13 +170,6 @@ class STTService:
             else recognition_config.ENABLE_AUTOMATIC_PUNCTUATION
         )
 
-        # Enable interim results for real-time partial transcript display
-        self.enable_interim_results = (
-            enable_interim_results
-            if enable_interim_results is not None
-            else recognition_config.ENABLE_INTERIM_RESULTS
-        )
-
         # Adaptation (PhraseSet/CustomClass) 설정
         self.enable_adaptation = (
             enable_adaptation
@@ -204,7 +193,6 @@ class STTService:
             f"model={self.model}, "
             f"sample_rate={self.sample_rate}Hz, "
             f"punctuation={self.enable_automatic_punctuation}, "
-            f"interim={self.enable_interim_results}, "
             f"adaptation={'enabled' if self.adaptation else 'disabled'}"
         )
 
@@ -218,7 +206,6 @@ class STTService:
             - ExplicitDecodingConfig: WebRTC 오디오 형식 명시적 지정
             - language_codes: 다중 언어 지원 (리스트)
             - model: latest_long 등
-            - interim_results: 실시간 중간 결과 (False 권장 - 낮은 지연시간)
         """
         recognition_config = cloud_speech.RecognitionConfig(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
@@ -245,12 +232,12 @@ class STTService:
             config=recognition_config,
         )
 
-        # StreamingRecognitionFeatures 추가 (interim results + voice activity timeout)
+        # StreamingRecognitionFeatures 추가 (voice activity timeout)
+        # 발화 후 59초까지 스트림 유지
         streaming_config.streaming_features = cloud_speech.StreamingRecognitionFeatures(
-            interim_results=self.enable_interim_results,
             enable_voice_activity_events=True,
             voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                speech_end_timeout=Duration(seconds=59),  # 발화 후 59초까지 스트림 유지
+                speech_end_timeout=Duration(seconds=59),
             ),
         )
 
@@ -535,21 +522,19 @@ class STTService:
                     result = response.results[0]
                     logger.info(f"Response #{response_count}: is_final={result.is_final}, alternatives={len(result.alternatives) if result.alternatives else 0}")
 
-                    if result.is_final or self.enable_interim_results:
+                    if result.is_final:
                         if result.alternatives:
                             transcript = result.alternatives[0].transcript
-                            confidence = result.alternatives[0].confidence if result.is_final else 0.0
+                            confidence = result.alternatives[0].confidence
 
-                            result_type = "FINAL" if result.is_final else "INTERIM"
                             logger.info(
-                                f"STT Result ({result_type}): '{transcript}' "
+                                f"STT Result (FINAL): '{transcript}' "
                                 f"(confidence: {confidence:.2f})"
                             )
 
-                            # Send both final and interim results with is_final flag
                             result_queue.put({
                                 "transcript": transcript,
-                                "is_final": result.is_final,
+                                "is_final": True,
                                 "confidence": confidence
                             })
 
