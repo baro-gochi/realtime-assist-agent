@@ -36,6 +36,7 @@ dependencies = [
     "langchain-postgres>=0.0.16",
     "psycopg>=3.3.2",
     "beautifulsoup4>=4.14.3",
+    "playwright>=1.57.0",
 ]
 
 [dependency-groups]

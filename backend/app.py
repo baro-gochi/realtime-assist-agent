@@ -57,6 +57,7 @@ import uuid
 import asyncio
 from contextlib import asynccontextmanager
 import os
+from collections import defaultdict
 from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Depends, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -110,6 +111,7 @@ room_manager = RoomManager()
 db_manager = get_db_manager()
 redis_manager = get_redis_manager()
 db_log_handler: Optional[DatabaseLogHandler] = None
+summary_counters: defaultdict[str, int] = defaultdict(int)
 
 
 @asynccontextmanager
@@ -755,22 +757,43 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 logger.warning(f"No agent found for room '{room_name}', skipping summary")
                 return
 
-            logger.info(f"Running agent for room '{room_name}'")
+            # 요약 실행 주기: 첫 최종 1회 + 이후 3회마다
+            should_run_summary = False
+            if is_final:
+                summary_counters[room_name] += 1
+                count = summary_counters[room_name]
+                should_run_summary = (count == 1) or (count % 3 == 0)
+
+            logger.info(
+                f"Running agent for room '{room_name}' "
+                f"(should_run_summary={should_run_summary}, count={summary_counters.get(room_name, 0)})"
+            )
             logger.info(f"Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
 
             # 비스트리밍 모드로 에이전트 실행 (JSON 응답)
-            result = await agent.on_new_transcript(peer_id, nickname, transcript, current_time)
+            result = await agent.on_new_transcript(
+                peer_id,
+                nickname,
+                transcript,
+                current_time,
+                run_summary=should_run_summary
+            )
 
             # 에러 체크
             if "error" in result:
                 logger.error(f"Agent returned error: {result['error']}")
                 return
 
-            # 결과 브로드캐스트 (JSON 형식의 요약)
+            # 요약 실행 안 했으면 브로드캐스트 스킵
+            if not should_run_summary:
+                return
+
+            # 결과 브로드캐스트 (Structured)
+            summary_payload = result.get("summary_result", {}) or {}
             current_summary = result.get("current_summary", "")
             last_summarized_index = result.get("last_summarized_index", 0)
 
-            logger.info(f"Broadcasting agent update with JSON summary")
+            logger.info(f"Broadcasting agent update with structured summary")
             logger.info(f"Summary: {current_summary[:100]}...")
 
             await broadcast_to_room(
@@ -779,8 +802,11 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "type": "agent_update",
                     "node": "summarize",
                     "data": {
-                        "current_summary": current_summary,
-                        "last_summarized_index": last_summarized_index
+                        "summary": summary_payload.get("summary", ""),
+                        "customer_issue": summary_payload.get("customer_issue", ""),
+                        "agent_action": summary_payload.get("agent_action", ""),
+                        "last_summarized_index": last_summarized_index,
+                        "raw": current_summary,
                     }
                 }
             )
@@ -995,6 +1021,57 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "data": {"rooms": room_manager.get_room_list()}
                 })
 
+            elif message_type == "agent_task":
+                task_payload = data.get("data", {})
+                task_type = task_payload.get("task")
+                target_room = task_payload.get("room_name") or current_room
+                user_options = task_payload.get("user_options")
+
+                if task_type != "consultation":
+                    await websocket.send_json({
+                        "type": "agent_error",
+                        "data": {"task": task_type, "message": "unsupported task"}
+                    })
+                    continue
+
+                if not target_room:
+                    await websocket.send_json({
+                        "type": "agent_error",
+                        "data": {"task": task_type, "message": "room is required"}
+                    })
+                    continue
+
+                # 진행 상태 알림
+                await websocket.send_json({
+                    "type": "agent_status",
+                    "data": {"task": "consultation", "status": "processing"}
+                })
+
+                try:
+                    agent = get_or_create_agent(target_room)
+                    result = await agent.run_consultation(user_options=user_options)
+
+                    if "error" in result:
+                        await websocket.send_json({
+                            "type": "agent_error",
+                            "data": {"task": "consultation", "message": result["error"]["message"]}
+                        })
+                        continue
+
+                    await broadcast_to_room(
+                        target_room,
+                        {
+                            "type": "agent_consultation",
+                            "data": result.get("consultation_result", {})
+                        }
+                    )
+                except Exception as e:
+                    logger.error(f"Consultation task failed: {e}", exc_info=True)
+                    await websocket.send_json({
+                        "type": "agent_error",
+                        "data": {"task": "consultation", "message": str(e)}
+                    })
+
             else:
                 logger.warning(f"Unknown message type from {peer_id}: {message_type}")
 
@@ -1020,6 +1097,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             )
 
             room_manager.leave_room(peer_id)
+            if room_manager.get_room_count(current_room) == 0:
+                summary_counters.pop(current_room, None)
 
         await peer_manager.close_peer_connection(peer_id)
         logger.info(f"Peer {peer_id} cleaned up")

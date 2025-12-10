@@ -51,6 +51,9 @@ function AssistantMain() {
   const [parsedSummary, setParsedSummary] = useState(null); // {summary, customer_issue, agent_action}
   const [summaryTimestamp, setSummaryTimestamp] = useState(null); // 요약 수신 시간
   const [llmStatus, setLlmStatus] = useState('connecting'); // 'connecting' | 'ready' | 'connected' | 'failed'
+  const [consultationStatus, setConsultationStatus] = useState('idle'); // idle | processing | done | error
+  const [consultationResult, setConsultationResult] = useState(null); // {guide, recommendations, citations}
+  const [consultationError, setConsultationError] = useState('');
 
   // WebRTC ref
   const webrtcClientRef = useRef(null);
@@ -195,41 +198,58 @@ function AssistantMain() {
     client.onAgentUpdate = (data) => {
       console.log('🤖 Agent update received:', JSON.stringify(data, null, 2));
 
-      // Null 체크
-      if (!data) {
-        console.warn('⚠️ Agent update received null data');
+      if (!data || data.node !== 'summarize') {
         return;
       }
 
-      // 에러 처리
-      if (data.node === 'error') {
-        setLlmStatus('failed');
-        console.error('❌ LLM error:', data.data?.message);
-        return;
-      }
+      const summaryData = data.data || {};
+      const parsed = {
+        summary: summaryData.summary || '',
+        customer_issue: summaryData.customer_issue || '',
+        agent_action: summaryData.agent_action || ''
+      };
 
-      // 정상 요약 수신 (JSON 파싱)
-      const currentSummary = data.data?.current_summary;
-      console.log('📥 Current summary raw:', currentSummary);
-
-      if (data.node === 'summarize' && currentSummary) {
-        // JSON 문자열 파싱 시도
+      // raw가 JSON 문자열일 경우만 파싱 시도 (호환성)
+      if ((!parsed.summary || !parsed.customer_issue || !parsed.agent_action) && summaryData.raw) {
         try {
-          const summaryJson = JSON.parse(currentSummary);
-          console.log('✅ Summary parsed successfully:', summaryJson);
-
-          // 파싱 성공 시에만 UI 업데이트
-          setLlmStatus('connected');
-          setSummaryTimestamp(Date.now());
-          setParsedSummary(summaryJson);
-        } catch (parseError) {
-          // JSON 파싱 실패 시 UI 업데이트 스킵
-          console.warn('⚠️ Failed to parse summary JSON:', parseError.message);
-          console.debug('Raw content:', currentSummary);
+          const json = JSON.parse(summaryData.raw);
+          parsed.summary = parsed.summary || json.summary || '';
+          parsed.customer_issue = parsed.customer_issue || json.customer_issue || '';
+          parsed.agent_action = parsed.agent_action || json.agent_action || '';
+        } catch (e) {
+          console.warn('⚠️ Failed to parse raw summary JSON:', e.message);
         }
-      } else {
-        console.warn('⚠️ Skipped update - node:', data.node, 'has summary:', !!currentSummary);
       }
+
+      setLlmStatus('connected');
+      setSummaryTimestamp(Date.now());
+      setParsedSummary(parsed);
+    };
+
+    // 상담 가이드 상태 업데이트
+    client.onAgentStatus = (data) => {
+      if (!data) return;
+      if (data.status === 'processing') {
+        setConsultationStatus('processing');
+        setConsultationError('');
+      } else if (data.status === 'error') {
+        setConsultationStatus('error');
+        setConsultationError(data.message || '에이전트 오류');
+      }
+    };
+
+    // 상담 가이드 결과 수신
+    client.onAgentConsultation = (data) => {
+      console.log('📑 Consultation result:', data);
+      if (!data) return;
+      setConsultationStatus('done');
+      setConsultationError('');
+      setConsultationResult({
+        guide: data.guide || [],
+        recommendations: data.recommendations || [],
+        citations: data.citations || [],
+        generated_at: data.generated_at || Date.now()
+      });
     };
 
     // 브라우저 종료/새로고침 시 즉시 정리 (beforeunload)
@@ -381,6 +401,11 @@ function AssistantMain() {
       await webrtcClientRef.current.joinRoom(room.room_name, nicknameInput.trim());
       setRoomName(room.room_name);
       setNickname(nicknameInput.trim());
+      // Fallback: 서버 room_joined 이벤트 지연 시에도 화면 전환
+      setCurrentRoom(room.room_name);
+      setIsInRoom(true);
+      setPeerCount(room.peer_count || 0);
+      setParticipants(room.peers || []);
     } catch (err) {
       setError(`Failed to join room: ${err.message}`);
     }
@@ -404,6 +429,10 @@ function AssistantMain() {
       await webrtcClientRef.current.joinRoom(roomInput.trim(), nicknameInput.trim());
       setRoomName(roomInput.trim());
       setNickname(nicknameInput.trim());
+      // Fallback: 서버 room_joined 이벤트 지연 시에도 화면 전환
+      setCurrentRoom(roomInput.trim());
+      setIsInRoom(true);
+      setPeerCount(1);
     } catch (err) {
       setError(`Failed to create room: ${err.message}`);
     }
@@ -454,6 +483,9 @@ function AssistantMain() {
     setNicknameInput('');
     setLlmStatus('connecting');
     setCallStartTime(null); // 통화 시작 시간 초기화
+    setConsultationStatus('idle');
+    setConsultationResult(null);
+    setConsultationError('');
   };
 
   /**
@@ -469,6 +501,25 @@ function AssistantMain() {
    */
   const getRemotePeer = () => {
     return participants.length > 0 ? participants[0] : null;
+  };
+
+  /**
+   * 상담 가이드 생성 요청
+   */
+  const handleConsultationRequest = () => {
+    if (!currentRoom) {
+      setConsultationError('룸 정보가 없습니다.');
+      return;
+    }
+    setConsultationStatus('processing');
+    setConsultationError('');
+    setConsultationResult(null);
+    try {
+      webrtcClientRef.current.sendConsultationTask(currentRoom, {});
+    } catch (e) {
+      setConsultationStatus('error');
+      setConsultationError(e.message || '요청 실패');
+    }
   };
 
   // Step 1: 역할 선택
@@ -804,27 +855,47 @@ function AssistantMain() {
         {/* Right Sidebar: AI Assistance - 상담사만 표시 */}
         {userRole === 'agent' && (
           <aside className="sidebar-right">
-            {/* AI Recommendations */}
+            {/* 상담 가이드 생성 */}
             <div className="card ai-recommendation">
-              <h2 className="card-title">AI 추천 답변 (RAG)</h2>
-              <div className="recommendation-list">
-                <div className="recommendation-item">
-                  📌 구현 예정: 대화 내용 기반 실시간 답변 추천 (RAG)
+              <h2 className="card-title">상담 가이드 생성</h2>
+              <p className="info-text">실시간 요약은 자동, 버튼을 눌러 가이드를 요청하세요.</p>
+              <button
+                className="btn btn-primary btn-block"
+                onClick={handleConsultationRequest}
+                disabled={consultationStatus === 'processing' || !isInRoom}
+              >
+                {consultationStatus === 'processing' ? '생성 중...' : '상담 가이드 생성'}
+              </button>
+              {consultationStatus === 'processing' && (
+                <p className="status-text">가이드를 생성하는 중입니다...</p>
+              )}
+              {consultationStatus === 'error' && consultationError && (
+                <p className="error-message">⚠️ {consultationError}</p>
+              )}
+              {consultationResult && (
+                <div className="consultation-result">
+                  <h3>가이드</h3>
+                  {consultationResult.guide.length === 0 ? (
+                    <p className="info-text">가이드가 비어 있습니다.</p>
+                  ) : (
+                    <ul>
+                      {consultationResult.guide.map((item, idx) => (
+                        <li key={idx}>{item}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {consultationResult.recommendations?.length > 0 && (
+                    <>
+                      <h4>추천</h4>
+                      <ul>
+                        {consultationResult.recommendations.map((rec, idx) => (
+                          <li key={idx}>{rec}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
                 </div>
-              </div>
-            </div>
-
-            {/* FAQ / Product Info Tabs */}
-            <div className="card card-flex">
-              <div className="tabs">
-                <button className="tab active">연관 정보</button>
-              </div>
-              <div className="faq-list">
-                <div className="faq-item">
-                  <h3>📌 구현 예정</h3>
-                  <p>대화 맥락 기반 FAQ, 상품 정보, 업무 절차 자동 검색 (RAG)</p>
-                </div>
-              </div>
+              )}
             </div>
           </aside>
         )}

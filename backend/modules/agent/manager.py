@@ -23,8 +23,8 @@ Example:
 """
 import logging
 import time
-from typing import Dict, Any
-from .graph import create_agent_graph, ConversationState
+from typing import Dict, Any, Optional
+from .graph import create_agent_graph, create_supervisor_graph, ConversationState
 from .config import llm_config
 from langchain.chat_models import init_chat_model
 
@@ -66,20 +66,15 @@ class RoomAgent:
                 # streaming=True
             )
 
-            # 시스템 메시지 (Runtime Context로 전달할 내용) - JSON 출력 강제, 한 문장 요약 강조
-            self.system_message = """
-            # 역할
-            고객 상담 대화를 요약하여 반드시 아래 JSON 형식으로만 출력하세요.
-            다른 텍스트 없이 JSON만 출력하세요.
+            # 시스템 메시지 (Runtime Context로 전달할 내용)
+            # with_structured_output이 JSON 형식을 강제하므로 형식 지시는 제거
+            self.system_message = """고객 상담 대화를 분석하여 요약하세요.
 
-            # 중요 규칙
-            - summary 필드는 반드시 한 문장이어야 합니다 (20자 이내)
-            - 이전 요약을 참고하지 말고 현재 대화만 요약하세요
-
-            {{"summary": "한 문장 요약 (20자 이내)", "customer_issue": "고객 문의 한 줄", "agent_action": "상담사 대응 한 줄"}}
-            # 예시:
-            {{"summary": "고객이 환불을 요청함", "customer_issue": "제품 불량으로 환불 요청", "agent_action": "환불 절차 안내"}}
-            """
+규칙:
+- summary: 현재 대화의 핵심을 한 문장(20자 이내)으로 요약
+- customer_issue: 고객이 문의한 내용을 한 줄로 정리
+- agent_action: 상담원이 취한 조치나 안내 내용을 한 줄로 정리
+- 대화가 짧으면 해당 필드는 빈 문자열로 남겨도 됩니다."""
 
             logger.info("LLM initialized successfully")
         except Exception as e:
@@ -91,7 +86,8 @@ class RoomAgent:
         self.llm_available = llm is not None
 
         if self.llm_available:
-            self.graph = create_agent_graph(llm)
+            # Supervisor 그래프 (summary + consultation)
+            self.graph = create_supervisor_graph(llm)
         else:
             self.graph = None
             logger.warning(f"RoomAgent for '{room_name}' created without LLM - summaries will not be generated")
@@ -100,8 +96,12 @@ class RoomAgent:
             "room_name": room_name,
             "conversation_history": [],
             "current_summary": "",
-            "last_summarized_index": 0,  # 증분 요약용 인덱스 추적
-            "messages": []  # MessagesState 필수 필드
+            "last_summarized_index": 0,
+            "summary_result": {},
+            "consultation_result": {},
+            "task": None,
+            "user_options": None,
+            "messages": []
         }
 
         logger.info(f"RoomAgent created for room: {room_name}")
@@ -111,7 +111,8 @@ class RoomAgent:
         speaker_id: str,
         speaker_name: str,
         text: str,
-        timestamp: float = None
+        timestamp: float = None,
+        run_summary: bool = True
     ) -> Dict[str, Any]:
         """새로운 transcript를 받아 에이전트를 실행합니다 (비스트리밍).
 
@@ -120,15 +121,16 @@ class RoomAgent:
             speaker_name (str): 발화자 이름 (nickname)
             text (str): 전사된 텍스트
             timestamp (float, optional): 타임스탬프. None이면 현재 시간 사용
+            run_summary (bool): True일 때만 요약 실행 (False면 히스토리만 기록)
 
         Returns:
-            Dict[str, Any]: {"current_summary": str (JSON), "last_summarized_index": int}
+            Dict[str, Any]: {"summary_result": dict, "last_summarized_index": int}
                            또는 에러 시 {"error": {"message": str}}
 
         Example:
             >>> result = await agent.on_new_transcript("peer123", "김철수", "환불하고 싶어요")
             >>> print(result)
-            {"current_summary": '{"summary": "...", "customer_issue": "...", "agent_action": "..."}', ...}
+            {"summary_result": {...}, ...}
         """
         if timestamp is None:
             timestamp = time.time()
@@ -147,6 +149,13 @@ class RoomAgent:
         )
         logger.info(f"Current conversation history count: {len(self.state['conversation_history'])}")
 
+        # 요약 생략 요청 시 히스토리만 기록
+        if not run_summary:
+            return {
+                "summary_result": self.state.get("summary_result", {}),
+                "last_summarized_index": self.state.get("last_summarized_index", 0)
+            }
+
         # LLM 없으면 요약 생성 스킵 (transcript는 이미 추가됨)
         if not self.llm_available:
             logger.warning(f"LLM not available - skipping summary generation for room '{self.room_name}'")
@@ -156,17 +165,19 @@ class RoomAgent:
         logger.info(f"Starting graph.ainvoke for room '{self.room_name}'")
 
         try:
-            # ainvoke로 한 번에 결과 받기 (비스트리밍)
+            # ainvoke로 한 번에 결과 받기
             result = await self.graph.ainvoke(
-                self.state,
+                {**self.state, "task": "summary"},
                 context={"system_message": self.system_message}  # Runtime Context 전달
             )
 
             # 결과에서 요약 및 인덱스 추출
+            summary_result = result.get("summary_result", {})
             current_summary = result.get("current_summary", "")
             last_summarized_index = result.get("last_summarized_index", 0)
 
             # State 업데이트
+            self.state["summary_result"] = summary_result
             self.state["current_summary"] = current_summary
             self.state["last_summarized_index"] = last_summarized_index
 
@@ -174,12 +185,30 @@ class RoomAgent:
             logger.info(f"Last summarized index: {last_summarized_index}")
 
             return {
+                "summary_result": summary_result,
                 "current_summary": current_summary,
                 "last_summarized_index": last_summarized_index
             }
 
         except Exception as e:
             logger.error(f"Error in agent execution: {e}", exc_info=True)
+            return {"error": {"message": str(e)}}
+
+    async def run_consultation(self, user_options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """버튼 요청 시 상담 워크플로우 실행."""
+        if not self.llm_available or not self.graph:
+            return {"error": {"message": "LLM not available"}}
+
+        try:
+            result = await self.graph.ainvoke(
+                {**self.state, "task": "consultation", "user_options": user_options},
+                context={"system_message": self.system_message}
+            )
+            consultation_result = result.get("consultation_result", {})
+            self.state["consultation_result"] = consultation_result
+            return {"consultation_result": consultation_result}
+        except Exception as e:
+            logger.error(f"Consultation task failed: {e}", exc_info=True)
             return {"error": {"message": str(e)}}
 
     def get_current_summary(self) -> str:
@@ -209,7 +238,11 @@ class RoomAgent:
             "room_name": self.room_name,
             "conversation_history": [],
             "current_summary": "",
-            "last_summarized_index": 0,  # 증분 요약용 인덱스 초기화
+            "last_summarized_index": 0,
+            "summary_result": {},
+            "consultation_result": {},
+            "task": None,
+            "user_options": None,
             "messages": []  # MessagesState 필수 필드
         }
 
@@ -269,3 +302,15 @@ def get_all_agents() -> Dict[str, RoomAgent]:
         모니터링 및 디버깅 목적
     """
     return room_agents.copy()
+
+
+async def run_agent_task(room_name: str, task: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """슈퍼바이저 태스크 실행 헬퍼."""
+    agent = get_or_create_agent(room_name)
+    if task == "consultation":
+        user_options = payload.get("user_options") if payload else None
+        return await agent.run_consultation(user_options=user_options)
+    elif task == "summary":
+        # summary는 on_new_transcript에서 호출되므로 여기서는 스킵
+        return {"error": {"message": "summary task is handled via transcript events"}}
+    return {"error": {"message": f"unknown task: {task}"}}

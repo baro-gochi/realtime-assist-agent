@@ -110,6 +110,8 @@ export class WebRTCClient {
     this.onError = null;
     this.onTranscript = null; // STT transcript 이벤트 콜백
     this.onLocalStream = null; // 로컬 스트림 획득 콜백
+    this.onAgentConsultation = null; // 상담 가이드 결과
+    this.onAgentStatus = null; // 상담 진행 상태
 
     // Prefetch TURN 자격 증명 on construction
     this.prefetchTurnCredentials();
@@ -349,6 +351,22 @@ export class WebRTCClient {
             data: message.data
           });
         }
+        break;
+
+      case 'agent_status':
+        console.log('🤖 Agent status:', data);
+        if (this.onAgentStatus) this.onAgentStatus(data);
+        break;
+
+      case 'agent_consultation':
+        console.log('🤖 Agent consultation result:', data);
+        if (this.onAgentConsultation) this.onAgentConsultation(data);
+        break;
+
+      case 'agent_error':
+        console.error('🤖 Agent error:', data);
+        if (this.onAgentStatus) this.onAgentStatus({ task: data.task, status: 'error' });
+        if (this.onError) this.onError(new Error(data.message || 'Agent error'));
         break;
 
       case 'error':
@@ -810,6 +828,19 @@ export class WebRTCClient {
     } else {
       console.warn('⚠️ WebSocket not connected, cannot send message');
     }
+  }
+
+  /**
+   * 상담 가이드 에이전트 태스크 요청을 전송합니다.
+   * @param {string} roomName
+   * @param {object} userOptions
+   */
+  sendConsultationTask(roomName, userOptions = {}) {
+    this.sendMessage('agent_task', {
+      task: 'consultation',
+      room_name: roomName,
+      user_options: userOptions
+    });
   }
 
   /**

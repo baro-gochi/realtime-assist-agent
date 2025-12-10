@@ -355,139 +355,144 @@ class STTService:
 
         def generate_requests():
             """동기 요청 생성기 (v2 방식) - 250ms 청크 누적 전송"""
-            # First request with recognizer and config
-            logger.info("Sending initial config request to STT API...")
-            config_request = cloud_speech.StreamingRecognizeRequest(
-                recognizer=self.recognizer,
-                streaming_config=streaming_config,
-            )
-            yield config_request
-            logger.info("Config request sent, waiting for audio frames...")
+            try:
+                # First request with recognizer and config
+                logger.info("Sending initial config request to STT API...")
+                config_request = cloud_speech.StreamingRecognizeRequest(
+                    recognizer=self.recognizer,
+                    streaming_config=streaming_config,
+                )
+                yield config_request
+                logger.info("Config request sent, waiting for audio frames...")
 
-            # 250ms 청크 누적 방식
-            frame_count = 0
-            chunk_count = 0
-            accumulated_arrays = []
-            accumulated_duration = 0.0
-            last_frame_time = None
-            silence_threshold = 30.0
-            first_frame_timeout = 60.0
+                # 250ms 청크 누적 방식
+                frame_count = 0
+                chunk_count = 0
+                accumulated_arrays = []
+                accumulated_duration = 0.0
+                last_frame_time = None
+                silence_threshold = 30.0
+                first_frame_timeout = 60.0
 
-            def process_accumulated_chunks():
-                """누적된 오디오를 처리하여 전송 (48kHz 직접 전송, 리샘플링 없음)"""
-                nonlocal chunk_count
-                if not accumulated_arrays:
-                    return None
+                def process_accumulated_chunks():
+                    """누적된 오디오를 처리하여 전송 (48kHz 직접 전송, 리샘플링 없음)"""
+                    nonlocal chunk_count
+                    if not accumulated_arrays:
+                        return None
 
-                # 모든 배열을 하나로 합침
-                combined_array = np.concatenate(accumulated_arrays)
-                combined_array = combined_array.astype(np.int16)
+                    # 모든 배열을 하나로 합침
+                    combined_array = np.concatenate(accumulated_arrays)
+                    combined_array = combined_array.astype(np.int16)
 
-                chunk_count += 1
+                    chunk_count += 1
 
-                # 오디오 상태 로그 (첫 청크 + 100청크마다)
-                if chunk_count == 1 or chunk_count % 100 == 0:
-                    max_val = np.abs(combined_array).max()
-                    mean_val = np.abs(combined_array).mean()
-                    non_zero = np.count_nonzero(combined_array)
-                    logger.info(
-                        f"Audio chunk #{chunk_count}: samples={len(combined_array)}, "
-                        f"max={max_val}, mean={mean_val:.1f}, non_zero={non_zero}/{len(combined_array)}"
-                    )
+                    # 오디오 상태 로그 (첫 청크 + 100청크마다)
+                    if chunk_count == 1 or chunk_count % 100 == 0:
+                        max_val = np.abs(combined_array).max()
+                        mean_val = np.abs(combined_array).mean()
+                        non_zero = np.count_nonzero(combined_array)
+                        logger.info(
+                            f"Audio chunk #{chunk_count}: samples={len(combined_array)}, "
+                            f"max={max_val}, mean={mean_val:.1f}, non_zero={non_zero}/{len(combined_array)}"
+                        )
 
-                audio_bytes = combined_array.tobytes()
-                return audio_bytes
+                    audio_bytes = combined_array.tobytes()
+                    return audio_bytes
 
-            while True:
-                try:
-                    # Wait longer for first frame, shorter for subsequent frames
-                    timeout = first_frame_timeout if frame_count == 0 else 0.1
-                    frame = sync_queue.get(timeout=timeout)
-                except queue.Empty:
-                    # 타임아웃 시 누적된 오디오가 있으면 전송
-                    if accumulated_arrays:
+                while True:
+                    try:
+                        # Wait longer for first frame, shorter for subsequent frames
+                        timeout = first_frame_timeout if frame_count == 0 else 0.1
+                        frame = sync_queue.get(timeout=timeout)
+                    except queue.Empty:
+                        # 타임아웃 시 누적된 오디오가 있으면 전송
+                        if accumulated_arrays:
+                            audio_bytes = process_accumulated_chunks()
+                            if audio_bytes:
+                                yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                            accumulated_arrays = []
+                            accumulated_duration = 0.0
+
+                        # Check if we should close stream due to prolonged silence
+                        if last_frame_time is not None:
+                            import time
+                            silence_duration = time.time() - last_frame_time
+                            if silence_duration > silence_threshold:
+                                logger.info(f"No audio for {silence_duration:.1f}s, closing stream gracefully...")
+                                break
+                        elif frame_count == 0:
+                            # No frames received at all after long wait
+                            logger.error(f"No audio frames received after {first_frame_timeout}s timeout!")
+                            break
+                        continue
+
+                    if frame is None:
+                        # 스트림 종료 전 남은 오디오 전송
+                        if accumulated_arrays:
+                            audio_bytes = process_accumulated_chunks()
+                            if audio_bytes:
+                                yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                        logger.info(f"Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
+                        break
+
+                    # Update last frame time
+                    import time
+                    last_frame_time = time.time()
+
+                    frame_count += 1
+                    if frame_count == 1:
+                        logger.info(f"AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
+
+                    # Convert frame to numpy array
+                    array = frame.to_ndarray()
+
+                    # Handle stereo to mono conversion
+                    if array.ndim > 1:
+                        array = array.flatten()
+
+                    if array.size == frame.samples * 2:
+                        array = array.reshape(-1, 2).mean(axis=1).astype(array.dtype)
+                        if frame_count == 1:
+                            logger.info(f"Converted stereo to mono")
+
+                    # Handle audio format conversion
+                    if array.dtype == np.float32 or array.dtype == np.float64:
+                        array = (array * 32767).astype(np.int16)
+                    elif array.dtype == np.int16:
+                        # Apply gain to low volume audio
+                        max_val = np.abs(array).max()
+                        if max_val > 0 and max_val < 5000:
+                            gain = min(6500.0 / max_val, 20.0)
+                            array = np.clip(array * gain, -32768, 32767).astype(np.int16)
+
+                    # 프레임 누적
+                    accumulated_arrays.append(array)
+                    frame_duration = frame.samples / frame.sample_rate
+                    accumulated_duration += frame_duration
+
+                    # 250ms 이상 누적되면 전송 (config에서 가져온 값 사용)
+                    from modules.stt.config import stt_config
+                    if accumulated_duration >= stt_config.CHUNK_DURATION:
                         audio_bytes = process_accumulated_chunks()
                         if audio_bytes:
-                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+                            chunk_size = len(audio_bytes)
+                            if chunk_size > 25000:
+                                logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
+                                for i in range(0, len(audio_bytes), self.input_sample_rate):
+                                    chunk = audio_bytes[i:i+self.input_sample_rate]
+                                    yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
+                            else:
+                                yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
+
+                            if chunk_count % 200 == 0:  # ~50초마다 로그
+                                logger.info(f"Sent {chunk_count} chunks to Google STT")
+
+                        # 누적 초기화
                         accumulated_arrays = []
                         accumulated_duration = 0.0
-
-                    # Check if we should close stream due to prolonged silence
-                    if last_frame_time is not None:
-                        import time
-                        silence_duration = time.time() - last_frame_time
-                        if silence_duration > silence_threshold:
-                            logger.info(f"No audio for {silence_duration:.1f}s, closing stream gracefully...")
-                            break
-                    elif frame_count == 0:
-                        # No frames received at all after long wait
-                        logger.error(f"No audio frames received after {first_frame_timeout}s timeout!")
-                        break
-                    continue
-
-                if frame is None:
-                    # 스트림 종료 전 남은 오디오 전송
-                    if accumulated_arrays:
-                        audio_bytes = process_accumulated_chunks()
-                        if audio_bytes:
-                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
-                    logger.info(f"Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
-                    break
-
-                # Update last frame time
-                import time
-                last_frame_time = time.time()
-
-                frame_count += 1
-                if frame_count == 1:
-                    logger.info(f"AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
-
-                # Convert frame to numpy array
-                array = frame.to_ndarray()
-
-                # Handle stereo to mono conversion
-                if array.ndim > 1:
-                    array = array.flatten()
-
-                if array.size == frame.samples * 2:
-                    array = array.reshape(-1, 2).mean(axis=1).astype(array.dtype)
-                    if frame_count == 1:
-                        logger.info(f"Converted stereo to mono")
-
-                # Handle audio format conversion
-                if array.dtype == np.float32 or array.dtype == np.float64:
-                    array = (array * 32767).astype(np.int16)
-                elif array.dtype == np.int16:
-                    # Apply gain to low volume audio
-                    max_val = np.abs(array).max()
-                    if max_val > 0 and max_val < 5000:
-                        gain = min(6500.0 / max_val, 20.0)
-                        array = np.clip(array * gain, -32768, 32767).astype(np.int16)
-
-                # 프레임 누적
-                accumulated_arrays.append(array)
-                frame_duration = frame.samples / frame.sample_rate
-                accumulated_duration += frame_duration
-
-                # 250ms 이상 누적되면 전송
-                if accumulated_duration >= streaming_config.CHUNK_DURATION:
-                    audio_bytes = process_accumulated_chunks()
-                    if audio_bytes:
-                        chunk_size = len(audio_bytes)
-                        if chunk_size > 25000:
-                            logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
-                            for i in range(0, len(audio_bytes), self.input_sample_rate):
-                                chunk = audio_bytes[i:i+self.input_sample_rate]
-                                yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
-                        else:
-                            yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
-
-                        if chunk_count % 200 == 0:  # ~50초마다 로그
-                            logger.info(f"Sent {chunk_count} chunks to Google STT")
-
-                    # 누적 초기화
-                    accumulated_arrays = []
-                    accumulated_duration = 0.0
+            except Exception as e:
+                logger.error(f"Error in generate_requests: {e}", exc_info=True)
+                return
 
         # Result queue to get transcripts from thread
         result_queue = queue.Queue()
@@ -546,11 +551,17 @@ class STTService:
 
             except Exception as e:
                 # Google STT API의 스트림 자동 종료 (정상적인 동작)
-                # 499 CANCELLED: Google이 스트림을 자동으로 닫음
-                # 500 Internal error: 스트림 제한 시간 도달
-                if ("499" in str(e) or "CANCELLED" in str(e).upper() or
-                    "500" in str(e) or "Internal error" in str(e)):
-                    logger.info(f"STT stream ended (normal behavior), will restart: {e}")
+                # 499 CANCELLED, 500 Internal error, Unknown(요청 반복 종료) 등은 재시도
+                err_text = str(e)
+                if (
+                    "499" in err_text
+                    or "CANCELLED" in err_text.upper()
+                    or "500" in err_text
+                    or "Internal error" in err_text
+                    or "Exception iterating requests" in err_text
+                    or "StatusCode.UNKNOWN" in err_text
+                ):
+                    logger.info(f"STT stream ended (normal or restartable): {e}")
                 else:
                     logger.error(f"Unexpected STT error: {e}", exc_info=True)
                 result_queue.put(None)

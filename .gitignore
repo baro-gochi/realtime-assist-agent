@@ -53,3 +53,5 @@ data/transcripts/
 data/chroma_db/
 data/chroma_db_dummie/
 data/json_dummie/
+
+AGENTS.md

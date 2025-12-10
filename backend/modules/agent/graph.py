@@ -1,45 +1,66 @@
-"""LangGraph Agent for Real-time Conversation Summarization.
+"""LangGraph Supervisor for 실시간 요약 + 상담 가이드.
 
-이 모듈은 실시간 상담 대화를 요약하는 LangGraph 에이전트를 정의합니다.
+이 모듈은 두 가지 작업을 관리하는 Supervisor 그래프를 정의합니다.
+    1) summary_worker : 실시간 요약 (structured output)
+    2) consultation_worker : 버튼으로 호출되는 상담 가이드 생성
 
-주요 기능:
-    - STT transcript를 받아 대화 히스토리 누적
-    - LLM을 사용하여 실시간 대화 요약 생성
-    - 스트리밍 모드로 업데이트 즉시 반환
-    - Runtime Context 패턴으로 시스템 메시지 한 번만 설정
-
-Architecture:
-    StateGraph with Runtime Context:
-        START → summarize_node → END
-        - Runtime Context: 시스템 메시지를 에이전트 생성 시 고정
-        - MessagesState: 메시지 히스토리 자동 관리
-
-State Structure:
-    - room_name: 방 이름
-    - conversation_history: [(speaker_name, text, timestamp)]
-    - current_summary: 현재까지의 대화 요약
-    - messages: MessagesState가 자동 관리하는 메시지 히스토리
-
-Example:
-    >>> from modules.agent import create_agent_graph
-    >>> graph = create_agent_graph(llm)
-    >>> async for chunk in graph.astream(
-    ...     state,
-    ...     stream_mode="updates",
-    ...     context={"system_message": "고객 상담 대화를 요약하세요."}
-    ... ):
-    ...     print(chunk)  # {"summarize": {"current_summary": "..."}}
+핵심 포인트:
+    - Runtime Context 패턴으로 시스템 메시지 주입
+    - Structured Output(Pydantic/JSON Schema)으로 결과 형식 보증
+    - supervisor 노드가 task에 따라 summarize/consultation으로 라우팅
 """
 import logging
+import time
 from typing import List, Dict, Any
 from dataclasses import dataclass
+from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import MessagesState
 from langgraph.runtime import Runtime
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage, HumanMessage
 
+from modules.consultation.workflow import run_consultation_async
+
 logger = logging.getLogger(__name__)
+
+
+# JSON Schema for Structured Output
+CONVERSATION_SUMMARY_SCHEMA = {
+    "title": "ConversationSummary",
+    "description": "실시간 대화 요약 스키마",
+    "type": "object",
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": "현재 대화의 한 문장 요약 (20자 이내)"
+        },
+        "customer_issue": {
+            "type": "string",
+            "description": "고객이 제기한 문의/이슈 한 줄 요약"
+        },
+        "agent_action": {
+            "type": "string",
+            "description": "상담원의 대응/조치 한 줄 요약"
+        }
+    },
+    "required": ["summary", "customer_issue", "agent_action"]
+}
+
+
+class SummaryResult(BaseModel):
+    """실시간 요약 결과 구조."""
+    summary: str = Field(default="", description="대화 한 줄 요약")
+    customer_issue: str = Field(default="", description="고객 문의 요약")
+    agent_action: str = Field(default="", description="상담원 조치 요약")
+
+
+class ConsultationResult(BaseModel):
+    """버튼으로 요청되는 상담 가이드 결과 구조."""
+    guide: List[str] = Field(default_factory=list, description="단계별 상담 가이드")
+    recommendations: List[str] = Field(default_factory=list, description="추가 제안 사항")
+    citations: List[str] = Field(default_factory=list, description="참조 문서/조항 식별자")
+    generated_at: float = Field(default_factory=time.time, description="UNIX timestamp")
 
 
 @dataclass
@@ -69,28 +90,37 @@ class ConversationState(MessagesState):
     conversation_history: List[Dict[str, Any]]
     current_summary: str
     last_summarized_index: int
+    summary_result: Dict[str, Any] | None
+    consultation_result: Dict[str, Any] | None
+    task: str | None
+    user_options: Dict[str, Any] | None
 
 
 def create_summarize_node(llm: BaseChatModel):
     """LLM을 사용하는 summarize 노드 팩토리 함수.
 
-    증분 요약 패턴: 새로운 transcript만 처리하여 기존 요약을 업데이트합니다.
-    JSON 형식으로 엄격하게 출력합니다.
+    with_structured_output을 사용하여 JSON Schema로 출력 형식을 강제합니다.
 
     Args:
         llm (BaseChatModel): 초기화된 LLM 인스턴스
 
     Returns:
-        Callable: summarize_node 함수 (LLM을 클로저로 캡처)
+        Callable: summarize_node 함수 (structured LLM을 클로저로 캡처)
     """
+    # Structured Output LLM 생성
+    structured_llm = llm.with_structured_output(
+        CONVERSATION_SUMMARY_SCHEMA,
+        method="json_schema",
+    )
+    logger.info("Structured LLM created with JSON Schema")
+
     async def summarize_node(
         state: ConversationState,
         runtime: Runtime[ContextSchema]
     ) -> Dict[str, Any]:
-        """대화 요약을 증분 생성하는 노드.
+        """대화 요약을 생성하는 노드 (Structured Output 사용).
 
-        이전에 요약된 부분은 건너뛰고, 새로운 transcript만 처리하여
-        기존 요약을 업데이트합니다. JSON 형식으로 출력합니다.
+        with_structured_output을 사용하여 항상 유효한 JSON을 반환합니다.
 
         Args:
             state (ConversationState): 현재 대화 상태
@@ -98,11 +128,12 @@ def create_summarize_node(llm: BaseChatModel):
 
         Returns:
             Dict[str, Any]: {
+                "summary_result": SummaryResult,
                 "current_summary": str (JSON 형식),
                 "last_summarized_index": int
             }
         """
-        logger.info("summarize_node started (incremental mode)")
+        logger.info("summarize_node started (structured output mode)")
         conversation_history = state.get("conversation_history", [])
         last_summarized_index = state.get("last_summarized_index", 0)
         current_summary = state.get("current_summary", "")
@@ -118,51 +149,42 @@ def create_summarize_node(llm: BaseChatModel):
                 "last_summarized_index": last_summarized_index
             }
 
-        # 새로운 transcript만 추출
-        new_transcripts = conversation_history[last_summarized_index:]
-        logger.info(f"Processing {len(new_transcripts)} new transcripts")
-
-        # 새로운 대화를 텍스트로 포맷팅
-        formatted_new = []
-        for entry in new_transcripts:
+        # 전체 대화를 텍스트로 포맷팅 (최근 20개만 사용)
+        recent_history = conversation_history[-20:]
+        formatted_lines = []
+        for entry in recent_history:
             speaker = entry.get("speaker_name", "Unknown")
             text = entry.get("text", "")
-            formatted_new.append(f"{speaker}: {text}")
-        new_conversation_text = "\n".join(formatted_new)
+            formatted_lines.append(f"{speaker}: {text}")
+        conversation_text = "\n".join(formatted_lines)
 
-        # 프롬프트 구성: 전체 대화 내용을 한 문장으로 요약 (덮어쓰기 방식)
-        # 전체 대화를 다시 요약하여 항상 최신 한 문장 요약 유지
-        all_formatted = []
-        for entry in conversation_history:
-            speaker = entry.get("speaker_name", "Unknown")
-            text = entry.get("text", "")
-            all_formatted.append(f"{speaker}: {text}")
-        all_conversation_text = "\n".join(all_formatted)
+        # 프롬프트 구성
+        user_content = f"""다음 고객 상담 대화를 분석하세요:
 
-        user_content = f"""전체 대화:
-{all_conversation_text}
+{conversation_text}
 
-위 전체 대화 내용을 한 문장으로 요약하여 JSON으로 출력하세요.
-요약은 반드시 한 문장이어야 합니다."""
+위 대화 내용을 요약해주세요."""
 
-        user_msg = HumanMessage(content=user_content)
-        messages = [user_msg]
+        messages = [HumanMessage(content=user_content)]
 
         # Runtime Context에서 시스템 메시지 가져오기
         if (system_message := runtime.context.system_message):
-            messages = [SystemMessage(system_message)] + messages
-            logger.info("System message added from runtime context")
+            messages = [SystemMessage(content=system_message)] + messages
+            logger.debug("System message added from runtime context")
 
-        # LLM 호출 (스트리밍 없이 한 번에)
-        logger.info("Calling LLM for incremental summary...")
+        # Structured LLM 호출
+        logger.info("Calling structured LLM for summary...")
         try:
-            response = await llm.ainvoke(messages)
-            summary = response.content.strip()
-            logger.info(f"Summary generated: {summary[:100]}...")
+            result: Dict[str, Any] = await structured_llm.ainvoke(messages)
+            summary_model = SummaryResult(**result)
+            # JSON 문자열(레거시) 유지
+            summary_json = summary_model.model_dump_json(ensure_ascii=False)
+            logger.info(f"Structured summary generated: {summary_json[:100]}...")
         except Exception as e:
-            logger.error(f"LLM call failed: {e}")
+            logger.error(f"Structured LLM call failed: {e}")
             # 에러 시 기존 요약 유지
             return {
+                "summary_result": state.get("summary_result", {}),
                 "current_summary": current_summary,
                 "last_summarized_index": last_summarized_index
             }
@@ -171,11 +193,81 @@ def create_summarize_node(llm: BaseChatModel):
         new_last_index = total_count
 
         return {
-            "current_summary": summary,
+            "summary_result": summary_model.model_dump(),
+            "current_summary": summary_json,
             "last_summarized_index": new_last_index
         }
 
     return summarize_node
+
+
+def create_consultation_node():
+    """consultation_worker 노드: 상담 워크플로우를 호출."""
+
+    async def consultation_node(state: ConversationState, runtime: Runtime[ContextSchema]) -> Dict[str, Any]:
+        conversation_history = state.get("conversation_history", [])
+
+        # 입력 요약: 최근 30개 발화 연결
+        recent_history = conversation_history[-30:]
+        formatted_lines = [f"{item.get('speaker_name', 'Unknown')}: {item.get('text', '')}" for item in recent_history]
+        summary_input = "\n".join(formatted_lines) if formatted_lines else "대화 없음"
+
+        logger.info("Running consultation workflow...")
+        try:
+            result = await run_consultation_async(summary_input)
+            guide_text = result.get("response_guide", "") or ""
+            # 간단한 분리: 줄 단위 bullet
+            guide_lines = [line.strip() for line in guide_text.splitlines() if line.strip()]
+            consultation_result = ConsultationResult(
+                guide=guide_lines,
+                recommendations=[],
+                citations=[],
+                generated_at=time.time(),
+            )
+            return {"consultation_result": consultation_result.model_dump()}
+        except Exception as e:
+            logger.error(f"Consultation workflow failed: {e}", exc_info=True)
+            return {"consultation_result": {"error": str(e)}}
+
+    return consultation_node
+
+
+def create_supervisor_graph(llm: BaseChatModel) -> StateGraph:
+    """요약/상담 가이드 두 작업을 관리하는 Supervisor 그래프."""
+
+    graph = StateGraph(
+        ConversationState,
+        context_schema=ContextSchema
+    )
+
+    summarize_node = create_summarize_node(llm)
+    consultation_node = create_consultation_node()
+
+    def route_task(state: ConversationState):
+        task = state.get("task", "summary") or "summary"
+        if task not in {"summary", "consultation"}:
+            return "summary"
+        return task
+
+    graph.add_node("route_task", lambda state: state)
+    graph.add_node("summarize", summarize_node)
+    graph.add_node("consultation", consultation_node)
+
+    graph.add_edge(START, "route_task")
+    graph.add_conditional_edges(
+        "route_task",
+        route_task,
+        {
+            "summary": "summarize",
+            "consultation": "consultation",
+        }
+    )
+    graph.add_edge("summarize", END)
+    graph.add_edge("consultation", END)
+
+    compiled_graph = graph.compile()
+    logger.info("Supervisor graph created and compiled")
+    return compiled_graph
 
 
 def create_agent_graph(llm: BaseChatModel) -> StateGraph:
@@ -204,25 +296,5 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
         ... ):
         ...     print(chunk)
     """
-    # StateGraph 생성 (context_schema 지정)
-    graph = StateGraph(
-        ConversationState,
-        context_schema=ContextSchema  # Runtime Context 패턴 적용
-    )
-
-    # LLM을 사용하는 summarize 노드 생성
-    summarize_node = create_summarize_node(llm)
-
-    # 노드 추가
-    graph.add_node("summarize", summarize_node)
-
-    # 엣지 연결
-    graph.add_edge(START, "summarize")
-    graph.add_edge("summarize", END)
-
-    # 컴파일
-    compiled_graph = graph.compile()
-
-    logger.info("Agent graph created and compiled with Runtime Context support")
-
-    return compiled_graph
+    # 기존 API 호환을 위해 supervisor 그래프를 반환합니다.
+    return create_supervisor_graph(llm)
