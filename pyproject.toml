@@ -21,7 +21,6 @@ dependencies = [
     "openai[aiohttp]>=2.8.1",
     "python-multipart>=0.0.6",
     "asyncpg>=0.31.0",
-    "redis>=7.1.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "langchain-openai>=0.0.5",
@@ -37,6 +36,8 @@ dependencies = [
     "psycopg>=3.3.2",
     "beautifulsoup4>=4.14.3",
     "playwright>=1.57.0",
+    "redis==6.2",
+    "langchain-redis>=0.2.5",
 ]
 
 [dependency-groups]
