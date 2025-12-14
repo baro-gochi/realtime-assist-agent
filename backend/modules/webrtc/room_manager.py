@@ -70,6 +70,7 @@ class Peer:
         peer_id (str): 피어의 고유 식별자 (UUID)
         nickname (str): 사용자가 설정한 표시 이름
         websocket (WebSocket): 피어와의 WebSocket 연결 객체
+        is_customer (bool): 고객 여부 (phone_number가 있으면 고객)
 
     Examples:
         >>> peer = Peer(
@@ -83,6 +84,7 @@ class Peer:
     peer_id: str
     nickname: str
     websocket: WebSocket
+    is_customer: bool = False
 
 
 class RoomManager:
@@ -180,7 +182,7 @@ class RoomManager:
             self.rooms[room_name] = {}
             self.room_transcripts[room_name] = []
             self.room_start_times[room_name] = datetime.now().timestamp()
-            logger.info(f"Room '{room_name}' created")
+            logger.info(f"[WebRTC] 룸 '{room_name}' 생성됨")
 
             # DB에 룸 생성 (백그라운드)
             asyncio.create_task(self._save_room_to_db(room_name))
@@ -191,11 +193,18 @@ class RoomManager:
             room_id = await self.room_repo.create_room(room_name)
             if room_id:
                 self.room_db_ids[room_name] = room_id
-                logger.debug(f"Room '{room_name}' saved to DB with id: {room_id}")
+                logger.debug(f"[WebRTC] 룸 '{room_name}' DB 저장 완료, id: {room_id}")
         except Exception as e:
-            logger.error(f"Failed to save room to DB: {e}")
+            logger.error(f"[WebRTC] 룸 DB 저장 실패: {e}")
 
-    def join_room(self, room_name: str, peer_id: str, nickname: str, websocket: WebSocket) -> None:
+    def join_room(
+        self,
+        room_name: str,
+        peer_id: str,
+        nickname: str,
+        websocket: WebSocket,
+        is_customer: bool = False
+    ) -> None:
         """피어를 지정된 룸에 추가합니다.
 
         룸이 존재하지 않으면 자동으로 생성한 후 피어를 추가합니다.
@@ -207,6 +216,7 @@ class RoomManager:
             peer_id (str): 참가하는 피어의 고유 ID
             nickname (str): 피어의 표시 이름
             websocket (WebSocket): 피어의 WebSocket 연결 객체
+            is_customer (bool): 고객 여부 (phone_number가 있으면 True)
 
         Note:
             - 룸이 없으면 자동으로 생성됨
@@ -219,7 +229,7 @@ class RoomManager:
             >>> manager.join_room("상담실1", "peer-123", "상담사", ws)
             INFO:__main__:Peer '상담사' (peer-123) joined room '상담실1'. Room has 1 peers
 
-            >>> manager.join_room("상담실1", "peer-456", "내담자", ws2)
+            >>> manager.join_room("상담실1", "peer-456", "내담자", ws2, is_customer=True)
             INFO:__main__:Peer '내담자' (peer-456) joined room '상담실1'. Room has 2 peers
         """
         # Create room if doesn't exist
@@ -227,12 +237,13 @@ class RoomManager:
             self.create_room(room_name)
 
         # Add peer to room
-        peer = Peer(peer_id=peer_id, nickname=nickname, websocket=websocket)
+        peer = Peer(peer_id=peer_id, nickname=nickname, websocket=websocket, is_customer=is_customer)
         self.rooms[room_name][peer_id] = peer
         self.peer_to_room[peer_id] = room_name
 
-        logger.info(f"Peer '{nickname}' ({peer_id}) joined room '{room_name}'. "
-                   f"Room has {len(self.rooms[room_name])} peers")
+        role = "고객" if is_customer else "상담사"
+        logger.info(f"[WebRTC] 피어 '{nickname}' ({peer_id[:8]}) [{role}] 룸 '{room_name}' 입장. "
+                   f"현재 참가자: {len(self.rooms[room_name])}명")
 
         # DB에 참가자 저장 (백그라운드)
         asyncio.create_task(self._save_peer_to_db(room_name, peer_id, nickname))
@@ -244,7 +255,7 @@ class RoomManager:
             if room_db_id:
                 await self.room_repo.add_peer(room_db_id, peer_id, nickname)
         except Exception as e:
-            logger.error(f"Failed to save peer to DB: {e}")
+            logger.error(f"[WebRTC] 피어 DB 저장 실패: {e}")
 
     def leave_room(self, peer_id: str) -> Optional[str]:
         """피어를 현재 속한 룸에서 제거합니다.
@@ -317,10 +328,10 @@ class RoomManager:
                 if room_name in self.room_db_ids:
                     del self.room_db_ids[room_name]
 
-                logger.info(f"Room '{room_name}' deleted (empty)")
+                logger.info(f"[WebRTC] 룸 '{room_name}' 삭제됨 (빈 룸)")
             else:
-                logger.info(f"Peer '{nickname}' ({peer_id}) left room '{room_name}'. "
-                           f"Room has {len(self.rooms[room_name])} peers")
+                logger.info(f"[WebRTC] 피어 '{nickname}' ({peer_id[:8]}) 룸 '{room_name}' 퇴장. "
+                           f"현재 참가자: {len(self.rooms[room_name])}명")
 
             return room_name
 
@@ -331,15 +342,15 @@ class RoomManager:
         try:
             await self.room_repo.remove_peer(room_db_id, peer_id)
         except Exception as e:
-            logger.error(f"Failed to remove peer from DB: {e}")
+            logger.error(f"[WebRTC] 피어 DB 퇴장 기록 실패: {e}")
 
     async def _end_room_in_db(self, room_db_id: UUID, room_name: str):
         """룸 종료를 DB에 기록합니다 (내부 메서드)."""
         try:
             await self.room_repo.end_room(room_db_id)
-            logger.debug(f"Room '{room_name}' marked as ended in DB")
+            logger.debug(f"[WebRTC] 룸 '{room_name}' DB에 종료 기록됨")
         except Exception as e:
-            logger.error(f"Failed to end room in DB: {e}")
+            logger.error(f"[WebRTC] 룸 DB 종료 기록 실패: {e}")
 
     def get_room_peers(self, room_name: str) -> List[Peer]:
         """특정 룸의 모든 피어 목록을 반환합니다.
@@ -540,7 +551,7 @@ class RoomManager:
             timestamp=timestamp
         )
         self.room_transcripts[room_name].append(entry)
-        logger.debug(f"Added transcript to room '{room_name}': {nickname}: {text}")
+        logger.debug(f"[WebRTC] 룸 '{room_name}' 대화 추가: {nickname}: {text}")
 
         # DB에 대화 내용 저장 (백그라운드)
         room_db_id = self.room_db_ids.get(room_name)
@@ -573,7 +584,7 @@ class RoomManager:
                 is_final=is_final
             )
         except Exception as e:
-            logger.error(f"Failed to save transcript to DB: {e}")
+            logger.error(f"[WebRTC] 대화 내용 DB 저장 실패: {e}")
 
     def _save_transcript_to_file(self, room_name: str):
         """룸의 대화 내용을 텍스트 파일로 저장합니다.
@@ -588,7 +599,7 @@ class RoomManager:
         """
         transcripts = self.room_transcripts.get(room_name, [])
         if not transcripts:
-            logger.info(f"No transcripts to save for room '{room_name}'")
+            logger.info(f"[WebRTC] 룸 '{room_name}' 저장할 대화 내용 없음")
             return
 
         # Create data/transcripts directory if not exists
@@ -619,6 +630,6 @@ class RoomManager:
                     time_str = msg_time.strftime('%H:%M:%S')
                     f.write(f"{entry.nickname} [{time_str}]: {entry.text}\n")
 
-            logger.info(f"Saved transcript for room '{room_name}' to {filepath} ({len(transcripts)} messages)")
+            logger.info(f"[WebRTC] 룸 '{room_name}' 대화 저장 완료: {filepath} ({len(transcripts)}개 메시지)")
         except Exception as e:
-            logger.error(f"Failed to save transcript for room '{room_name}': {e}")
+            logger.error(f"[WebRTC] 룸 '{room_name}' 대화 저장 실패: {e}")

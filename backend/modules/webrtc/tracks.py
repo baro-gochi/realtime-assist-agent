@@ -5,7 +5,8 @@ WebRTC 오디오 트랙을 릴레이하고 STT 처리를 위한 프레임 캡처
 
 import asyncio
 import logging
-from typing import Optional
+from collections import deque
+from typing import Optional, Deque
 from aiortc import MediaStreamTrack
 
 logger = logging.getLogger(__name__)
@@ -37,17 +38,20 @@ class AudioRelayTrack(MediaStreamTrack):
     def __init__(
         self,
         track: MediaStreamTrack,
-        stt_queue: Optional[asyncio.Queue] = None
+        stt_queue: Optional[asyncio.Queue] = None,
+        ring_buffer: Optional[Deque] = None,
     ):
         """AudioRelayTrack 초기화.
 
         Args:
             track (MediaStreamTrack): 릴레이할 원본 오디오 트랙
             stt_queue (Optional[asyncio.Queue]): STT 처리용 큐 (None이면 비활성화)
+            ring_buffer (Optional[Deque]): STT 재시작 시 재주입할 최신 프레임 버퍼
         """
         super().__init__()
         self.track = track
         self.stt_queue = stt_queue
+        self.ring_buffer = ring_buffer
 
     async def recv(self):
         """오디오 프레임을 수신하고 릴레이합니다.
@@ -64,18 +68,30 @@ class AudioRelayTrack(MediaStreamTrack):
         """
         frame = await self.track.recv()
 
+        # Keep a short ring buffer so we can re-feed audio when STT 재시작
+        if self.ring_buffer is not None:
+            self.ring_buffer.append(frame)
+
         # Send frame to STT queue if available
         if self.stt_queue:
             try:
                 # Debug: Log first frame
                 if not hasattr(self, '_first_frame_logged'):
-                    logger.info("AudioRelayTrack: First frame sent to STT queue!")
+                    logger.info("[WebRTC] AudioRelayTrack: 첫 프레임 STT 큐로 전송")
                     self._first_frame_logged = True
 
                 self.stt_queue.put_nowait(frame)
             except asyncio.QueueFull:
-                # Skip frame if queue is full
-                logger.warning("STT queue full, dropping audio frame")
-                pass
+                # Drop the oldest frame to keep the most recent audio during congestion
+                try:
+                    dropped = self.stt_queue.get_nowait()
+                    if not hasattr(self, "_drop_logged"):
+                        logger.warning("[WebRTC] STT 큐 가득 참, 가장 오래된 프레임 삭제 후 최신 프레임 유지")
+                        self._drop_logged = True
+                    self.stt_queue.put_nowait(frame)
+                except asyncio.QueueEmpty:
+                    # If we cannot drop, just skip
+                    logger.warning("[WebRTC] STT 큐 가득 참, 오디오 프레임 드랍")
+                    pass
 
         return frame

@@ -44,7 +44,8 @@ See Also:
 """
 import asyncio
 import logging
-from typing import Dict, Optional, Callable, List
+from collections import deque
+from typing import Dict, Optional, Callable, List, Deque
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
 
@@ -136,13 +137,16 @@ class PeerConnectionManager:
         # Track TURN candidate arrival (peer_id -> bool)
         self.turn_candidate_received: Dict[str, bool] = {}
 
+        # Short ring buffers per peer to re-inject audio across STT restarts
+        self.audio_ring_buffers: Dict[str, Deque] = {}
+
     async def create_peer_connection(
         self,
         peer_id: str,
         room_name: str,
         other_peers_in_room: list
     ) -> RTCPeerConnection:
-        logger.info(f"create_peer_connection: peer={peer_id[:8]}, room={room_name}, others={len(other_peers_in_room)}")
+        logger.info(f"[WebRTC] 피어 연결 생성: peer={peer_id[:8]}, room={room_name}, 다른참가자={len(other_peers_in_room)}")
         """룸의 피어를 위한 새로운 WebRTC 연결을 생성합니다.
 
         RTCPeerConnection을 생성하고 이벤트 핸들러를 등록합니다.
@@ -187,7 +191,7 @@ class PeerConnectionManager:
         # STUN 서버 추가 (AWS coturn + Google 백업)
         if ice_config.STUN_SERVER_URL:
             ice_servers.append(RTCIceServer(urls=[ice_config.STUN_SERVER_URL]))
-            logger.info(f"AWS STUN server configured: {ice_config.STUN_SERVER_URL}")
+            logger.info(f"[WebRTC] AWS STUN 서버 설정: {ice_config.STUN_SERVER_URL}")
 
         # Google STUN 서버 (백업용)
         for stun_url in ice_config.DEFAULT_STUN_SERVERS:
@@ -200,10 +204,10 @@ class PeerConnectionManager:
                 username=ice_config.TURN_USERNAME,
                 credential=ice_config.TURN_CREDENTIAL
             ))
-            logger.info(f"AWS TURN server configured: {ice_config.TURN_SERVER_URL}")
-            logger.debug(f"TURN credentials - username: {ice_config.TURN_USERNAME}")
+            logger.info(f"[WebRTC] AWS TURN 서버 설정: {ice_config.TURN_SERVER_URL}")
+            logger.debug(f"[WebRTC] TURN 자격증명 - username: {ice_config.TURN_USERNAME}")
         else:
-            logger.warning("AWS TURN server credentials not found in config - using STUN only")
+            logger.warning("[WebRTC] AWS TURN 서버 설정 없음 - STUN만 사용")
 
         # aiortc doesn't support iceTransportPolicy parameter
         # Use both TURN (preferred) and STUN (fallback) servers
@@ -214,7 +218,7 @@ class PeerConnectionManager:
         pc = RTCPeerConnection(configuration=config)
 
         # Force ICE gathering to wait by NOT calling setLocalDescription immediately
-        logger.info(f"  RTCPeerConnection created, TURN will allocate in background")
+        logger.info(f"[WebRTC] RTCPeerConnection 생성 완료, TURN 백그라운드 할당")
         self.peers[peer_id] = pc
         self.peer_rooms[peer_id] = room_name
 
@@ -224,7 +228,7 @@ class PeerConnectionManager:
             if candidate:
                 is_relay = "relay" in candidate.candidate.lower()
                 cand_type = "TURN" if is_relay else "host/srflx"
-                logger.info(f"ICE candidate: type={cand_type}, peer={peer_id[:8]}")
+                logger.info(f"[WebRTC] ICE 후보: type={cand_type}, peer={peer_id[:8]}")
 
                 if is_relay:
                     self.turn_candidate_received[peer_id] = True
@@ -232,7 +236,7 @@ class PeerConnectionManager:
                 if self.on_ice_candidate_callback:
                     await self.on_ice_candidate_callback(peer_id, candidate)
                 else:
-                    logger.warning(f"Callback is None!")
+                    logger.warning(f"[WebRTC] 콜백이 None입니다!")
 
         @pc.on("iceconnectionstatechange")
         async def on_ice_connection_state_change():
@@ -246,7 +250,7 @@ class PeerConnectionManager:
                 - "failed" 상태 시 자동으로 연결 종료 및 정리 수행
                 - ICE 상태: new, checking, connected, completed, failed, disconnected, closed
             """
-            logger.info(f"Peer {peer_id} ICE state: {pc.iceConnectionState}")
+            logger.info(f"[WebRTC] 피어 {peer_id[:8]} ICE 상태: {pc.iceConnectionState}")
             if pc.iceConnectionState == "failed":
                 await self.close_peer_connection(peer_id)
 
@@ -273,7 +277,7 @@ class PeerConnectionManager:
                 - 이렇게 해야 RTP timestamp가 일정하게 유지됨 (jitterBufferDelay 안정화)
                 - 각 트랙에 "ended" 이벤트 핸들러 등록
             """
-            logger.info(f"Peer {peer_id} in room '{room_name}' received {track.kind} track")
+            logger.info(f"[WebRTC] 피어 {peer_id[:8]} (룸: {room_name}) {track.kind} 트랙 수신")
 
             # Check if this is the first track from this peer
             trigger_renegotiation = peer_id not in self.renegotiation_triggered
@@ -283,8 +287,9 @@ class PeerConnectionManager:
                 if peer_id not in self.stt_tasks:
                     await self._start_stt_processing(peer_id, room_name)
 
-                # Get STT queue for this peer
+                # Get STT queue and ring buffer for this peer
                 stt_queue = self.audio_queues.get(peer_id)
+                ring_buffer = self.audio_ring_buffers.get(peer_id)
 
                 # CRITICAL FIX: Use MediaRelay.subscribe() to create independent track copies
                 # Without this, multiple consumers (STT + other peers) share the same frame buffer,
@@ -292,7 +297,7 @@ class PeerConnectionManager:
 
                 # 1. Create STT track using relay subscription
                 stt_track_source = self.relay.subscribe(track)
-                stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue)
+                stt_relay_track = AudioRelayTrack(stt_track_source, stt_queue, ring_buffer)
 
                 # 2. Store original track for relay to other peers (each will get their own subscription)
                 self.audio_tracks[peer_id] = track
@@ -310,10 +315,10 @@ class PeerConnectionManager:
             # Trigger renegotiation ONCE per peer (when first track arrives)
             if trigger_renegotiation and self.on_track_received_callback:
                 self.renegotiation_triggered[peer_id] = True
-                logger.info(f"Triggering renegotiation for peer {peer_id} (first track)")
+                logger.info(f"[WebRTC] 피어 {peer_id[:8]} renegotiation 트리거 (첫 트랙)")
                 await self.on_track_received_callback(peer_id, room_name, track.kind)
             elif not trigger_renegotiation:
-                logger.info(f"Skipping renegotiation trigger (already triggered for {peer_id})")
+                logger.info(f"[WebRTC] renegotiation 스킵 (피어 {peer_id[:8]} 이미 트리거됨)")
 
             @track.on("ended")
             async def on_ended():
@@ -326,7 +331,7 @@ class PeerConnectionManager:
                     - 현재는 로깅만 수행
                     - 향후 트랙 종료 시 추가 정리 작업 가능
                 """
-                logger.info(f"Peer {peer_id} {track.kind} track ended")
+                logger.info(f"[WebRTC] 피어 {peer_id[:8]} {track.kind} 트랙 종료")
 
         return pc
 
@@ -371,7 +376,7 @@ class PeerConnectionManager:
                 # MediaRelay.subscribe() for independent frame buffer per peer
                 relayed_track = self.relay.subscribe(track)
                 pc.addTrack(relayed_track)
-                logger.info(f"Relaying {track.kind} from {source_peer_id} to {peer_id} in room '{room_name}'")
+                logger.info(f"[WebRTC] {track.kind} 릴레이: {source_peer_id[:8]} -> {peer_id[:8]} (룸: {room_name})")
 
     async def handle_offer(
         self,
@@ -432,24 +437,24 @@ class PeerConnectionManager:
         # Check if this is a renegotiation (peer connection already exists)
         if peer_id in self.peers:
             pc = self.peers[peer_id]
-            logger.info(f"Renegotiating existing connection for {peer_id}")
+            logger.info(f"[WebRTC] 기존 연결 재협상: {peer_id[:8]}")
 
             # Get currently added track IDs to avoid duplicates
             current_senders = pc.getSenders()
-            logger.info(f"Renegotiation: PC state before - signaling={pc.signalingState}, connection={pc.connectionState}")
-            logger.info(f"Current senders count: {len(current_senders)}")
+            logger.info(f"[WebRTC] 재협상: 상태 - signaling={pc.signalingState}, connection={pc.connectionState}")
+            logger.info(f"[WebRTC] 현재 센더 수: {len(current_senders)}")
             current_track_ids = set()
             for sender in current_senders:
                 if sender.track:
                     track_id = sender.track.id
                     if track_id is not None:
                         current_track_ids.add(track_id)
-                        logger.debug(f"Sender track: {track_id}")
+                        logger.debug(f"[WebRTC] 센더 트랙: {track_id}")
                     else:
-                        logger.warning(f"Sender has track with None id")
+                        logger.warning(f"[WebRTC] 센더 트랙 ID가 None")
                 else:
-                    logger.debug(f"Sender has no track")
-            logger.info(f"Current tracks in connection: {len(current_track_ids)}")
+                    logger.debug(f"[WebRTC] 센더에 트랙 없음")
+            logger.info(f"[WebRTC] 연결 내 트랙 수: {len(current_track_ids)}")
 
             # CRITICAL FIX: Do NOT add tracks during renegotiation!
             # Adding tracks after setRemoteDescription causes "None is not in list" error
@@ -463,15 +468,15 @@ class PeerConnectionManager:
                     RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
                 )
             except Exception as sdp_error:
-                logger.error(f"Failed to set remote description during renegotiation: {sdp_error}")
+                logger.error(f"[WebRTC] 재협상 중 remote description 설정 실패: {sdp_error}")
                 raise
 
-            logger.info(f"After setRemoteDescription: signaling={pc.signalingState}")
+            logger.info(f"[WebRTC] setRemoteDescription 후: signaling={pc.signalingState}")
 
             # If state is already stable, setRemoteDescription handled the offer internally
             # This can happen when aiortc determines no actual changes are needed
             if pc.signalingState == "stable":
-                logger.info(f"Signaling already stable - no answer needed, returning current local description")
+                logger.info(f"[WebRTC] 시그널링 이미 stable - answer 불필요, 현재 local description 반환")
                 # Return the existing local description (already has answer set)
                 if pc.localDescription:
                     return {
@@ -480,27 +485,27 @@ class PeerConnectionManager:
                     }
                 else:
                     # Edge case: no local description, need to create one
-                    logger.warning("No local description in stable state, cannot create answer")
+                    logger.warning("[WebRTC] stable 상태이나 local description 없음, answer 생성 불가")
                     raise ValueError("Cannot create answer: signaling state is stable but no local description")
 
             # CRITICAL: Create answer IMMEDIATELY - do not wait!
             # The signaling state can change during async waits, causing "None is not in list" errors
             # ICE gathering will happen asynchronously after answer is created
-            logger.info(f"Creating answer immediately (signaling={pc.signalingState})")
+            logger.info(f"[WebRTC] answer 즉시 생성 (signaling={pc.signalingState})")
 
             # Create answer (includes newly added tracks)
             try:
                 answer = await pc.createAnswer()
                 await pc.setLocalDescription(answer)
-                logger.info(f"Answer created and local description set")
+                logger.info(f"[WebRTC] answer 생성 및 local description 설정 완료")
             except Exception as answer_error:
-                logger.error(f"Failed to create/set answer during renegotiation: {answer_error}")
-                logger.error(f"   PC state: signaling={pc.signalingState}, connection={pc.connectionState}")
+                logger.error(f"[WebRTC] 재협상 중 answer 생성/설정 실패: {answer_error}")
+                logger.error(f"[WebRTC] PC 상태: signaling={pc.signalingState}, connection={pc.connectionState}")
                 raise
 
             # Log ICE gathering state
             candidate_count = pc.localDescription.sdp.count("a=candidate:")
-            logger.info(f"  [Renego] After setLocalDescription: gathering={pc.iceGatheringState}, candidates={candidate_count}")
+            logger.info(f"[WebRTC] 재협상 setLocalDescription 후: gathering={pc.iceGatheringState}, 후보수={candidate_count}")
 
             return {
                 "sdp": pc.localDescription.sdp,
@@ -508,7 +513,7 @@ class PeerConnectionManager:
             }
 
         # Initial connection case - create new peer connection
-        logger.info(f"Creating new peer connection for {peer_id}")
+        logger.info(f"[WebRTC] 새 피어 연결 생성: {peer_id[:8]}")
         pc = await self.create_peer_connection(peer_id, room_name, other_peers_in_room)
 
         # Add audio tracks from other peers in the room
@@ -520,7 +525,7 @@ class PeerConnectionManager:
                     # MediaRelay.subscribe() for independent frame buffer
                     relayed_track = self.relay.subscribe(original_track)
                     pc.addTrack(relayed_track)
-                    logger.info(f"Added audio track from {other_peer_id} to {peer_id}")
+                    logger.info(f"[WebRTC] 오디오 트랙 추가: {other_peer_id[:8]} -> {peer_id[:8]}")
 
         # Set remote description (offer)
         await pc.setRemoteDescription(
@@ -528,18 +533,18 @@ class PeerConnectionManager:
         )
 
         # Create answer
-        logger.info(f"  Creating answer...")
+        logger.info(f"[WebRTC] answer 생성 중...")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
 
         candidate_count = pc.localDescription.sdp.count("a=candidate:")
-        logger.info(f"  SDP has {candidate_count} candidates, gathering={pc.iceGatheringState}")
+        logger.info(f"[WebRTC] SDP 후보 수: {candidate_count}, gathering={pc.iceGatheringState}")
 
         # NOTE: aiortc doesn't fire on("icecandidate") for candidates after gathering completes
         # TURN allocation happens in background but won't trigger events
         # We just send the answer - client will use STUN/host candidates
         # Connection should still work via STUN reflexive candidates
-        logger.info(f"  Sending answer (TURN may complete later)")
+        logger.info(f"[WebRTC] answer 전송 (TURN은 나중에 완료될 수 있음)")
 
         return {
             "sdp": pc.localDescription.sdp,
@@ -597,7 +602,7 @@ class PeerConnectionManager:
         # Stop STT processing
         await self._stop_stt_processing(peer_id)
 
-        logger.info(f"Peer {peer_id} connection closed")
+        logger.info(f"[WebRTC] 피어 {peer_id[:8]} 연결 종료")
 
     async def cleanup_all(self):
         """모든 피어 연결을 종료합니다.
@@ -656,7 +661,7 @@ class PeerConnectionManager:
             - 트랙이 종료되거나 에러 발생 시 자동으로 종료됩니다
             - 피어가 연결 해제되면 자동으로 정리됩니다
         """
-        logger.info(f"Starting audio track consumer for peer {peer_id}")
+        logger.info(f"[WebRTC] 피어 {peer_id[:8]} 오디오 트랙 컨슈머 시작")
         frame_count = 0
         try:
             while True:
@@ -665,16 +670,16 @@ class PeerConnectionManager:
                 frame_count += 1
 
                 if frame_count == 1:
-                    logger.info(f"First frame consumed from peer {peer_id}")
+                    logger.info(f"[WebRTC] 피어 {peer_id[:8]} 첫 프레임 수신")
                 elif frame_count % 500 == 0:
-                    logger.debug(f"Consumed {frame_count} frames from peer {peer_id}")
+                    logger.debug(f"[WebRTC] 피어 {peer_id[:8]} 프레임 {frame_count}개 수신")
 
         except asyncio.CancelledError:
-            logger.info(f"Audio consumer task cancelled for peer {peer_id}")
+            logger.info(f"[WebRTC] 피어 {peer_id[:8]} 오디오 컨슈머 태스크 취소됨")
         except Exception as e:
-            logger.error(f"Audio track consumer error for peer {peer_id}: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"[WebRTC] 피어 {peer_id[:8]} 오디오 트랙 컨슈머 오류: {type(e).__name__}: {e}", exc_info=True)
         finally:
-            logger.info(f"Audio track consumer ended for peer {peer_id}. Total frames: {frame_count}")
+            logger.info(f"[WebRTC] 피어 {peer_id[:8]} 오디오 트랙 컨슈머 종료. 총 프레임: {frame_count}")
 
     async def _start_stt_processing(self, peer_id: str, room_name: str):
         """피어의 오디오 스트림에 대한 STT 처리를 시작합니다.
@@ -692,7 +697,7 @@ class PeerConnectionManager:
             - 인식된 텍스트는 on_transcript_callback으로 전달됨
         """
         if peer_id in self.stt_tasks:
-            logger.warning(f"STT already running for peer {peer_id}")
+            logger.warning(f"[WebRTC] 피어 {peer_id[:8]} STT 이미 실행 중")
             return
 
         # Create dedicated STTService instance for this peer
@@ -705,13 +710,73 @@ class PeerConnectionManager:
         audio_queue = asyncio.Queue(maxsize=500)
         self.audio_queues[peer_id] = audio_queue
 
+        # Ring buffer to allow gapless restart (keep ~1.5s of latest frames)
+        ring_buffer_size = 75  # ~50fps * 1.5s
+        self.audio_ring_buffers[peer_id] = deque(maxlen=ring_buffer_size)
+
         # Start STT processing task
         task = asyncio.create_task(
             self._process_stt_for_peer(peer_id, room_name, audio_queue, stt_service)
         )
         self.stt_tasks[peer_id] = task
 
-        logger.info(f"Started STT processing for peer {peer_id} in room '{room_name}'")
+        logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 처리 시작 (룸: {room_name})")
+
+    async def _prefill_queue_from_ring_buffer(
+        self,
+        peer_id: str,
+        audio_queue: asyncio.Queue,
+        reason: str = "",
+        force: bool = False
+    ):
+        """최근 프레임 링버퍼를 큐에 재주입하여 재시작 공백을 줄입니다.
+
+        Args:
+            peer_id: 피어 ID
+            audio_queue: 오디오 프레임 큐
+            reason: 재주입 사유 (로깅용)
+            force: True면 큐 상태와 관계없이 재주입 (타임아웃 복구용)
+
+        Note:
+            - 큐에 이미 충분한 프레임이 있으면 중복 방지를 위해 스킵
+            - 타임아웃/에러 복구 시에만 force=True로 호출
+        """
+        ring_buffer = self.audio_ring_buffers.get(peer_id)
+        if not ring_buffer:
+            return
+
+        # 큐에 이미 충분한 프레임이 있으면 재주입 스킵 (중복 방지)
+        # force=True인 경우 (타임아웃 복구) 이 체크 건너뜀
+        min_queue_threshold = 25  # ~50fps * 0.5s
+        current_queue_size = audio_queue.qsize()
+        if not force and current_queue_size >= min_queue_threshold:
+            logger.debug(
+                f"[WebRTC] 링버퍼 재주입 스킵 (peer={peer_id[:8]}, queue={current_queue_size}, reason={reason})"
+            )
+            return
+
+        trimmed = 0
+        # Drop stale backlog so the latest audio fits
+        while audio_queue.qsize() > len(ring_buffer):
+            try:
+                audio_queue.get_nowait()
+                trimmed += 1
+            except asyncio.QueueEmpty:
+                break
+
+        enqueued = 0
+        # Copy to avoid mutation while iterating
+        for frame in list(ring_buffer):
+            try:
+                audio_queue.put_nowait(frame)
+                enqueued += 1
+            except asyncio.QueueFull:
+                break
+
+        if trimmed or enqueued:
+            logger.info(
+                f"[WebRTC] 링버퍼 재주입 (peer={peer_id[:8]}, enqueued={enqueued}, trimmed={trimmed}, reason={reason})"
+            )
 
     async def _process_stt_for_peer(
         self,
@@ -745,26 +810,35 @@ class PeerConnectionManager:
 
         while retry_count < max_retries:
             try:
-                logger.info(f"Starting STT stream #{retry_count + 1} for peer {peer_id}")
+                # Re-inject the latest audio before opening a new stream
+                await self._prefill_queue_from_ring_buffer(peer_id, audio_queue, reason="restart")
+                logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 스트림 #{retry_count + 1} 시작")
 
                 async for result in stt_service.process_audio_stream(audio_queue):
                     transcript = result.get("transcript", "")
                     is_final = result.get("is_final", True)
                     confidence = result.get("confidence", 0.0)
 
-                    logger.info(f"Google STT FINAL from peer {peer_id}: {transcript} (confidence: {confidence:.2f})")
+                    # 신뢰도 필터링: 낮은 신뢰도 결과는 무시 (배경 잡음 필터링)
+                    min_confidence = 0.7
+                    if confidence < min_confidence:
+                        logger.debug(f"[WebRTC] 피어 {peer_id[:8]} STT 무시 (신뢰도 {confidence:.2f} < {min_confidence}): {transcript}")
+                        continue
+
+                    logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 최종: {transcript} (신뢰도: {confidence:.2f})")
 
                     # Call callback if set (with source identifier and is_final flag)
                     if self.on_transcript_callback and transcript.strip():
                         await self.on_transcript_callback(peer_id, room_name, transcript, connection_config.STT_ENGINE, is_final)
 
                 # Stream ended normally - restart it for continuous recognition
-                logger.info(f"STT stream ended normally for peer {peer_id}, restarting for continuous recognition...")
+                logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 스트림 정상 종료, 연속 인식을 위해 재시작...")
 
                 # 큐에 남은 프레임 유지 (버퍼링) - 새 스트림에서 처리
+                # 정상 종료 시에는 ring buffer 재주입 불필요 (이미 처리된 오디오)
                 queue_size = audio_queue.qsize()
                 if queue_size > 0:
-                    logger.info(f"Preserving {queue_size} buffered frames for new stream")
+                    logger.info(f"[WebRTC] 버퍼 프레임 {queue_size}개 유지 (새 스트림용)")
 
                 # 빠르게 재시작 (지연 최소화)
                 await asyncio.sleep(0.05)
@@ -775,7 +849,7 @@ class PeerConnectionManager:
                 continue  # Restart the loop instead of breaking
 
             except asyncio.CancelledError:
-                logger.info(f"STT processing cancelled for peer {peer_id}")
+                logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 처리 취소됨")
                 raise
 
             except Exception as e:
@@ -785,21 +859,26 @@ class PeerConnectionManager:
                 # Check if it's a timeout error
                 if "timeout" in error_msg.lower() or "409" in error_msg:
                     logger.warning(
-                        f"STT stream timeout for peer {peer_id} "
-                        f"(attempt {retry_count}/{max_retries}). "
-                        f"Restarting stream..."
+                        f"[WebRTC] 피어 {peer_id[:8]} STT 스트림 타임아웃 "
+                        f"(시도 {retry_count}/{max_retries}), 스트림 재시작..."
                     )
 
-                    # CRITICAL: Clear the queue to prevent overflow
-                    # The old frames are stale and will cause the new stream to timeout too
+                    # Trim backlog but keep the most recent frames so restart is gapless
                     queue_size = audio_queue.qsize()
                     if queue_size > 0:
-                        logger.info(f"Clearing {queue_size} stale frames from audio queue")
-                        while not audio_queue.empty():
+                        keep_after_trim = len(self.audio_ring_buffers.get(peer_id) or [])
+                        trimmed = 0
+                        while audio_queue.qsize() > keep_after_trim:
                             try:
                                 audio_queue.get_nowait()
+                                trimmed += 1
                             except asyncio.QueueEmpty:
                                 break
+                        logger.info(f"[WebRTC] 오디오 큐 트림: {trimmed}개 제거, 남은 {audio_queue.qsize()}개")
+
+                    # Re-inject latest frames from ring buffer to cover the timeout gap
+                    # force=True: 타임아웃으로 인한 공백 복구 필요
+                    await self._prefill_queue_from_ring_buffer(peer_id, audio_queue, reason="timeout", force=True)
 
                     # Wait a bit before retrying
                     await asyncio.sleep(0.5)
@@ -811,14 +890,14 @@ class PeerConnectionManager:
                 else:
                     # Other errors - log and retry
                     logger.error(
-                        f"Error in STT processing for peer {peer_id}: {e}",
+                        f"[WebRTC] 피어 {peer_id[:8]} STT 처리 오류: {e}",
                         exc_info=True
                     )
                     await asyncio.sleep(1)
                     continue
 
         if retry_count >= max_retries:
-            logger.error(f"Max STT retries reached for peer {peer_id}")
+            logger.error(f"[WebRTC] 피어 {peer_id[:8]} STT 최대 재시도 횟수 도달")
 
     async def _stop_stt_processing(self, peer_id: str):
         """피어의 STT 처리를 중지합니다.
@@ -847,8 +926,12 @@ class PeerConnectionManager:
                 pass
             del self.audio_queues[peer_id]
 
+        # Remove ring buffer
+        if peer_id in self.audio_ring_buffers:
+            del self.audio_ring_buffers[peer_id]
+
         # Remove STT service instance
         if peer_id in self.stt_services:
             del self.stt_services[peer_id]
 
-        logger.info(f"🛑 Stopped STT processing for peer {peer_id}")
+        logger.info(f"[WebRTC] 피어 {peer_id[:8]} STT 처리 중지")

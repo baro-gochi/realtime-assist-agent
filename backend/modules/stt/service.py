@@ -48,7 +48,11 @@ import queue
 import threading
 
 # Config 모듈
-from .config import google_cloud_config, recognition_config, streaming_config
+from .config import (
+    google_cloud_config,
+    recognition_config,
+    streaming_config as stt_streaming_config,
+)
 
 # Adaptation 모듈 (동일 패키지에서 import)
 try:
@@ -145,7 +149,7 @@ class STTService:
         self.language_codes = language_codes or recognition_config.language_codes
 
         self.model = model or recognition_config.MODEL
-        self.sample_rate = streaming_config.TARGET_SAMPLE_RATE
+        self.sample_rate = stt_streaming_config.TARGET_SAMPLE_RATE
         self.input_sample_rate = recognition_config.SAMPLE_RATE_HERTZ
 
         # Location 설정 (리전별 엔드포인트 지원)
@@ -156,10 +160,10 @@ class STTService:
             api_endpoint = f"{self.location}-speech.googleapis.com"
             client_options = ClientOptions(api_endpoint=api_endpoint)
             self.client = SpeechClient(client_options=client_options)
-            logger.info(f"Using regional endpoint: {api_endpoint}")
+            logger.info(f"[STT] 리전 엔드포인트 사용: {api_endpoint}")
         else:
             self.client = SpeechClient()
-            logger.info("Using global endpoint: speech.googleapis.com")
+            logger.info("[STT] 글로벌 엔드포인트 사용: speech.googleapis.com")
 
         # Recognizer path
         self.recognizer = f"projects/{self.project_id}/locations/{self.location}/recognizers/_"
@@ -181,19 +185,19 @@ class STTService:
             try:
                 self.adaptation = get_default_adaptation()
                 if self.adaptation:
-                    logger.info("STT adaptation loaded from config")
+                    logger.info("[STT] 어댑테이션 설정 로드 완료")
             except Exception as e:
-                logger.warning(f"Failed to load STT adaptation: {e}")
+                logger.warning(f"[STT] 어댑테이션 로드 실패: {e}")
 
         logger.info(
-            f"STT Service v2 initialized: "
-            f"project={self.project_id}, "
-            f"location={self.location}, "
-            f"languages={self.language_codes}, "
-            f"model={self.model}, "
-            f"sample_rate={self.sample_rate}Hz, "
-            f"punctuation={self.enable_automatic_punctuation}, "
-            f"adaptation={'enabled' if self.adaptation else 'disabled'}"
+            f"[STT] 서비스 v2 초기화 완료: "
+            f"프로젝트={self.project_id}, "
+            f"위치={self.location}, "
+            f"언어={self.language_codes}, "
+            f"모델={self.model}, "
+            f"샘플레이트={self.sample_rate}Hz, "
+            f"구두점={'활성' if self.enable_automatic_punctuation else '비활성'}, "
+            f"어댑테이션={'활성' if self.adaptation else '비활성'}"
         )
 
     def _create_streaming_config(self) -> cloud_speech.StreamingRecognitionConfig:
@@ -207,7 +211,7 @@ class STTService:
             - language_codes: 다중 언어 지원 (리스트)
             - model: latest_long 등
         """
-        recognition_config = cloud_speech.RecognitionConfig(
+        recognition_cfg = cloud_speech.RecognitionConfig(
             explicit_decoding_config=cloud_speech.ExplicitDecodingConfig(
                 encoding=cloud_speech.ExplicitDecodingConfig.AudioEncoding.LINEAR16,
                 sample_rate_hertz=self.sample_rate,
@@ -219,29 +223,28 @@ class STTService:
 
         # Features 설정 (구두점 등)
         if self.enable_automatic_punctuation:
-            recognition_config.features = cloud_speech.RecognitionFeatures(
+            recognition_cfg.features = cloud_speech.RecognitionFeatures(
                 enable_automatic_punctuation=True
             )
 
         # Adaptation 설정 (PhraseSet/CustomClass)
         if self.adaptation:
-            recognition_config.adaptation = self.adaptation
+            recognition_cfg.adaptation = self.adaptation
 
         # StreamingRecognitionConfig 생성
-        streaming_config = cloud_speech.StreamingRecognitionConfig(
-            config=recognition_config,
+        streaming_config_message = cloud_speech.StreamingRecognitionConfig(
+            config=recognition_cfg,
         )
 
-        # StreamingRecognitionFeatures 추가 (voice activity timeout)
-        # 발화 후 59초까지 스트림 유지
-        streaming_config.streaming_features = cloud_speech.StreamingRecognitionFeatures(
-            enable_voice_activity_events=True,
-            voice_activity_timeout=cloud_speech.StreamingRecognitionFeatures.VoiceActivityTimeout(
-                speech_end_timeout=Duration(seconds=59),
-            ),
+        # StreamingRecognitionFeatures 설정
+        # enable_voice_activity_events=False: Google VAD 비활성화
+        #   - True: Google이 음성 종료 감지 시 즉시 스트림 종료 (잦은 재시작)
+        #   - False: 스트림 유지, is_final로 문장 단위 결과는 정상 수신 (5분 제한)
+        streaming_config_message.streaming_features = cloud_speech.StreamingRecognitionFeatures(
+            enable_voice_activity_events=False,
         )
 
-        return streaming_config
+        return streaming_config_message
 
     async def _audio_frame_to_bytes(self, frame: AudioFrame) -> bytes:
         """AudioFrame을 Google STT API 형식의 PCM bytes로 변환.
@@ -321,7 +324,7 @@ class STTService:
             ...         "data": {"text": text}
             ...     })
         """
-        streaming_config = self._create_streaming_config()
+        streaming_config_message = self._create_streaming_config()
 
         # Thread-safe queue to bridge asyncio and sync code
         sync_queue = queue.Queue()
@@ -332,22 +335,22 @@ class STTService:
             """asyncio Queue에서 thread-safe Queue로 프레임 전송"""
             chunk_count = 0
             try:
-                logger.info("Starting frame transfer task...")
+                logger.info("[STT] 프레임 전송 태스크 시작...")
                 while not stop_event.is_set():
                     frame = await audio_queue.get()
                     if frame is None:
-                        logger.info("Audio stream ended (received None)")
+                        logger.info("[STT] 오디오 스트림 종료 (None 수신)")
                         sync_queue.put(None)
                         break
 
                     chunk_count += 1
                     if chunk_count == 1:
-                        logger.info(f"First audio frame received! Starting transfer...")
+                        logger.info(f"[STT] 첫 번째 오디오 프레임 수신, 전송 시작...")
 
                     sync_queue.put(frame)
-                logger.info(f"Frame transfer completed. Total chunks: {chunk_count}")
+                logger.info(f"[STT] 프레임 전송 완료. 총 청크: {chunk_count}")
             except Exception as e:
-                logger.error(f"Error in frame transfer: {e}", exc_info=True)
+                logger.error(f"[STT] 프레임 전송 오류: {e}", exc_info=True)
                 sync_queue.put(None)
 
         # Start frame transfer task
@@ -357,13 +360,13 @@ class STTService:
             """동기 요청 생성기 (v2 방식) - 250ms 청크 누적 전송"""
             try:
                 # First request with recognizer and config
-                logger.info("Sending initial config request to STT API...")
+                logger.info("[STT] 초기 설정 요청 전송 중...")
                 config_request = cloud_speech.StreamingRecognizeRequest(
                     recognizer=self.recognizer,
-                    streaming_config=streaming_config,
+                    streaming_config=streaming_config_message,
                 )
                 yield config_request
-                logger.info("Config request sent, waiting for audio frames...")
+                logger.info("[STT] 설정 요청 완료, 오디오 프레임 대기 중...")
 
                 # 250ms 청크 누적 방식
                 frame_count = 0
@@ -371,7 +374,9 @@ class STTService:
                 accumulated_arrays = []
                 accumulated_duration = 0.0
                 last_frame_time = None
-                silence_threshold = 30.0
+                # WebRTC 프레임 자체가 안 오는 경우의 타임아웃 (연결 끊김 감지)
+                # voice_activity_timeout과 일치 (Google 최대 60초)
+                silence_threshold = 60.0
                 first_frame_timeout = 60.0
 
                 def process_accumulated_chunks():
@@ -392,8 +397,8 @@ class STTService:
                         mean_val = np.abs(combined_array).mean()
                         non_zero = np.count_nonzero(combined_array)
                         logger.info(
-                            f"Audio chunk #{chunk_count}: samples={len(combined_array)}, "
-                            f"max={max_val}, mean={mean_val:.1f}, non_zero={non_zero}/{len(combined_array)}"
+                            f"[STT] 오디오 청크 #{chunk_count}: 샘플수={len(combined_array)}, "
+                            f"최대={max_val}, 평균={mean_val:.1f}, 비제로={non_zero}/{len(combined_array)}"
                         )
 
                     audio_bytes = combined_array.tobytes()
@@ -418,11 +423,11 @@ class STTService:
                             import time
                             silence_duration = time.time() - last_frame_time
                             if silence_duration > silence_threshold:
-                                logger.info(f"No audio for {silence_duration:.1f}s, closing stream gracefully...")
+                                logger.info(f"[STT] {silence_duration:.1f}초간 오디오 없음, 스트림 정상 종료...")
                                 break
                         elif frame_count == 0:
                             # No frames received at all after long wait
-                            logger.error(f"No audio frames received after {first_frame_timeout}s timeout!")
+                            logger.error(f"[STT] {first_frame_timeout}초 타임아웃 후에도 오디오 프레임 수신 없음!")
                             break
                         continue
 
@@ -432,7 +437,7 @@ class STTService:
                             audio_bytes = process_accumulated_chunks()
                             if audio_bytes:
                                 yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
-                        logger.info(f"Stream end signal received. Total frames: {frame_count}, chunks sent: {chunk_count}")
+                        logger.info(f"[STT] 스트림 종료 신호 수신. 총 프레임: {frame_count}, 전송 청크: {chunk_count}")
                         break
 
                     # Update last frame time
@@ -441,7 +446,7 @@ class STTService:
 
                     frame_count += 1
                     if frame_count == 1:
-                        logger.info(f"AudioFrame info - sample_rate: {frame.sample_rate}, format: {frame.format.name}, samples: {frame.samples}")
+                        logger.info(f"[STT] 오디오 프레임 정보 - 샘플레이트: {frame.sample_rate}, 포맷: {frame.format.name}, 샘플수: {frame.samples}")
 
                     # Convert frame to numpy array
                     array = frame.to_ndarray()
@@ -453,7 +458,7 @@ class STTService:
                     if array.size == frame.samples * 2:
                         array = array.reshape(-1, 2).mean(axis=1).astype(array.dtype)
                         if frame_count == 1:
-                            logger.info(f"Converted stereo to mono")
+                            logger.info(f"[STT] 스테레오를 모노로 변환")
 
                     # Handle audio format conversion
                     if array.dtype == np.float32 or array.dtype == np.float64:
@@ -471,13 +476,12 @@ class STTService:
                     accumulated_duration += frame_duration
 
                     # 250ms 이상 누적되면 전송 (config에서 가져온 값 사용)
-                    from modules.stt.config import stt_config
-                    if accumulated_duration >= stt_config.CHUNK_DURATION:
+                    if accumulated_duration >= stt_streaming_config.CHUNK_DURATION:
                         audio_bytes = process_accumulated_chunks()
                         if audio_bytes:
                             chunk_size = len(audio_bytes)
                             if chunk_size > 25000:
-                                logger.warning(f"Audio chunk size {chunk_size} exceeds 25KB limit, splitting...")
+                                logger.warning(f"[STT] 오디오 청크 크기 {chunk_size}가 25KB 제한 초과, 분할 중...")
                                 for i in range(0, len(audio_bytes), self.input_sample_rate):
                                     chunk = audio_bytes[i:i+self.input_sample_rate]
                                     yield cloud_speech.StreamingRecognizeRequest(audio=chunk)
@@ -485,13 +489,13 @@ class STTService:
                                 yield cloud_speech.StreamingRecognizeRequest(audio=audio_bytes)
 
                             if chunk_count % 200 == 0:  # ~50초마다 로그
-                                logger.info(f"Sent {chunk_count} chunks to Google STT")
+                                logger.info(f"[STT] Google STT로 {chunk_count}개 청크 전송 완료")
 
                         # 누적 초기화
                         accumulated_arrays = []
                         accumulated_duration = 0.0
             except Exception as e:
-                logger.error(f"Error in generate_requests: {e}", exc_info=True)
+                logger.error(f"[STT] 요청 생성 오류: {e}", exc_info=True)
                 return
 
         # Result queue to get transcripts from thread
@@ -500,32 +504,32 @@ class STTService:
         def run_streaming_recognize():
             """동기 STT 호출을 스레드에서 실행"""
             try:
-                logger.info(f"Starting streaming recognition with recognizer: {self.recognizer}")
-                logger.info(f"API endpoint: {self.client._transport._host if hasattr(self.client, '_transport') else 'unknown'}")
+                logger.info(f"[STT] 스트리밍 인식 시작 (recognizer: {self.recognizer})")
+                logger.info(f"[STT] API 엔드포인트: {self.client._transport._host if hasattr(self.client, '_transport') else 'unknown'}")
 
-                logger.info("Calling streaming_recognize()...")
+                logger.info("[STT] streaming_recognize() 호출 중...")
                 responses_iterator = self.client.streaming_recognize(
                     requests=generate_requests()
                 )
-                logger.info("streaming_recognize() returned iterator, starting to iterate...")
+                logger.info("[STT] streaming_recognize() 반환됨, 반복 시작...")
 
-                logger.info("Waiting for first response from STT API...")
+                logger.info("[STT] STT API 첫 응답 대기 중...")
 
                 response_count = 0
                 for response in responses_iterator:
                     if response_count == 0:
-                        logger.info("STT stream connection established, first response received!")
+                        logger.info("[STT] 스트림 연결 완료, 첫 응답 수신!")
                     else:
-                        logger.info(f"Received response after waiting...")
+                        logger.info(f"[STT] 대기 후 응답 수신...")
                     response_count += 1
-                    logger.info(f"Received response #{response_count} from STT API")
+                    logger.info(f"[STT] 응답 #{response_count} 수신")
 
                     if not response.results:
-                        logger.info(f"Response #{response_count} has no results (empty)")
+                        logger.info(f"[STT] 응답 #{response_count} 결과 없음 (빈 응답)")
                         continue
 
                     result = response.results[0]
-                    logger.info(f"Response #{response_count}: is_final={result.is_final}, alternatives={len(result.alternatives) if result.alternatives else 0}")
+                    logger.info(f"[STT] 응답 #{response_count}: is_final={result.is_final}, 후보수={len(result.alternatives) if result.alternatives else 0}")
 
                     if result.is_final:
                         if result.alternatives:
@@ -533,8 +537,8 @@ class STTService:
                             confidence = result.alternatives[0].confidence
 
                             logger.info(
-                                f"STT Result (FINAL): '{transcript}' "
-                                f"(confidence: {confidence:.2f})"
+                                f"[STT] 인식 결과 (최종): '{transcript}' "
+                                f"(신뢰도: {confidence:.2f})"
                             )
 
                             result_queue.put({
@@ -543,14 +547,14 @@ class STTService:
                                 "confidence": confidence
                             })
 
-                    logger.info(f"Waiting for response #{response_count + 1}...")
+                    logger.info(f"[STT] 응답 #{response_count + 1} 대기 중...")
 
                 # Signal end of stream
-                logger.info(f"Response iterator ended. Total responses: {response_count}")
+                logger.info(f"[STT] 응답 반복자 종료. 총 응답: {response_count}")
                 result_queue.put(None)
 
             except Exception as e:
-                # Google STT API의 스트림 자동 종료 (정상적인 동작)
+                # Google STT API의 스트림 자동 종료
                 # 499 CANCELLED, 500 Internal error, Unknown(요청 반복 종료) 등은 재시도
                 err_text = str(e)
                 if (
@@ -561,9 +565,9 @@ class STTService:
                     or "Exception iterating requests" in err_text
                     or "StatusCode.UNKNOWN" in err_text
                 ):
-                    logger.info(f"STT stream ended (normal or restartable): {e}")
+                    logger.info(f"[STT] 스트림 종료 (정상 또는 재시작 가능): {e}")
                 else:
-                    logger.error(f"Unexpected STT error: {e}", exc_info=True)
+                    logger.error(f"[STT] Unexpected error: {e}", exc_info=True)
                 result_queue.put(None)
 
         try:
@@ -585,7 +589,7 @@ class STTService:
                     continue
 
         except Exception as e:
-            logger.error(f"Error in process_audio_stream: {e}", exc_info=True)
+            logger.error(f"[STT] 오디오 스트림 처리 오류: {e}", exc_info=True)
             raise
         finally:
             stop_event.set()
@@ -642,11 +646,11 @@ class STTService:
 
             if response.results:
                 transcript = response.results[0].alternatives[0].transcript
-                logger.info(f"Single audio STT v2 result: '{transcript}'")
+                logger.info(f"[STT] 단일 오디오 v2 인식 결과: '{transcript}'")
                 return transcript
 
             return None
 
         except Exception as e:
-            logger.error(f"Error in single audio recognition (v2): {e}")
+            logger.error(f"[STT] 단일 오디오 인식 오류 (v2): {e}")
             return None

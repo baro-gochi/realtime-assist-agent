@@ -303,18 +303,19 @@ class STTAdaptationConfig:
         # AdaptationPhraseSet 목록 생성
         adaptation_phrase_sets = []
         for ps_config in all_phrase_sets:
-            phrases = [
-                cloud_speech.PhraseSet.Phrase(
-                    value=p.value,
-                    boost=p.boost if p.boost is not None else 0
-                )
-                for p in ps_config.phrases
-            ]
+            # value는 str, boost는 float로 변환 (YAML에서 숫자가 int로 파싱될 수 있음)
+            phrases = []
+            for p in ps_config.phrases:
+                if p.boost is not None:
+                    phrases.append(cloud_speech.PhraseSet.Phrase(value=str(p.value), boost=float(p.boost)))
+                else:
+                    phrases.append(cloud_speech.PhraseSet.Phrase(value=str(p.value)))
 
-            inline_phrase_set = cloud_speech.PhraseSet(
-                phrases=phrases,
-                boost=ps_config.boost if ps_config.boost is not None else 0
-            )
+            # PhraseSet의 boost도 동일하게 처리
+            if ps_config.boost is not None:
+                inline_phrase_set = cloud_speech.PhraseSet(phrases=phrases, boost=float(ps_config.boost))
+            else:
+                inline_phrase_set = cloud_speech.PhraseSet(phrases=phrases)
 
             adaptation_phrase_sets.append(
                 cloud_speech.SpeechAdaptation.AdaptationPhraseSet(
@@ -322,31 +323,22 @@ class STTAdaptationConfig:
                 )
             )
 
-        # CustomClass 목록 생성
-        custom_classes = []
-        for cc_config in self.custom_classes:
-            custom_class = cloud_speech.CustomClass(
-                name=cc_config.name,
-                display_name=cc_config.display_name,
-                items=[
-                    cloud_speech.CustomClass.ClassItem(value=item)
-                    for item in cc_config.items
-                ]
+        # CustomClass는 Google Cloud에 먼저 리소스로 생성해야 사용 가능
+        # v2 API에서는 inline CustomClass를 지원하지 않음
+        # 향후 필요시 CreateCustomClass API로 미리 생성 후 참조
+        # 현재는 PhraseSet만 사용
+        if self.custom_classes:
+            logger.warning(
+                f"CustomClass {len(self.custom_classes)}개는 v2 API에서 inline 지원 안됨, 무시됨. "
+                "Google Cloud Console에서 먼저 생성 필요."
             )
-            custom_classes.append(custom_class)
 
         adaptation = cloud_speech.SpeechAdaptation(
             phrase_sets=adaptation_phrase_sets,
-            custom_classes=custom_classes
         )
 
         phrase_count = sum(len(ps.phrases) for ps in all_phrase_sets)
-        class_count = len(custom_classes)
-        item_count = sum(len(cc.items) for cc in self.custom_classes)
-        logger.info(
-            f"STT adaptation configured: "
-            f"{phrase_count} phrases, {class_count} custom classes ({item_count} items)"
-        )
+        logger.info(f"STT adaptation configured: {phrase_count} phrases")
 
         return adaptation
 
