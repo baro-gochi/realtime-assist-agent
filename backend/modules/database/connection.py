@@ -12,6 +12,7 @@ Examples:
 """
 
 import os
+import json
 import logging
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -51,6 +52,21 @@ class DatabaseManager:
         """DB 연결 초기화 완료 여부."""
         return self._initialized and self.pool is not None
 
+    async def _init_connection(self, conn: asyncpg.Connection):
+        """각 연결에 JSONB 코덱을 설정합니다."""
+        await conn.set_type_codec(
+            'jsonb',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+        await conn.set_type_codec(
+            'json',
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema='pg_catalog'
+        )
+
     async def initialize(self, min_size: int = 5, max_size: int = 20) -> bool:
         """연결 풀을 초기화합니다.
 
@@ -71,6 +87,7 @@ class DatabaseManager:
                 min_size=min_size,
                 max_size=max_size,
                 command_timeout=60,
+                init=self._init_connection,
             )
             self._initialized = True
             logger.info(f"Database connection pool initialized (min={min_size}, max={max_size})")

@@ -8,20 +8,30 @@ Redis Schema:
     - kt:faq:id:{id} - 개별 FAQ 데이터
     - kt:faq:keywords - 검색 키워드 Set
 
+Semantic Cache:
+    - 의미 기반 캐싱을 통해 유사한 질문에 대해 캐시된 결과 반환
+    - semantic_search() 메서드 사용
+
 Usage:
     >>> from modules.database import get_faq_service
     >>> faq_service = get_faq_service()
     >>> await faq_service.initialize()
+    >>> # 키워드 기반 검색
     >>> results = await faq_service.search("VIP 등급")
+    >>> # 의미 기반 검색 (캐싱 포함)
+    >>> result = await faq_service.semantic_search("VIP 되려면 어떻게 해요?")
 """
 
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from .redis_connection import get_redis_manager
+
+if TYPE_CHECKING:
+    from .faq_cache import FAQCacheResult
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +274,85 @@ class FAQService:
         """FAQ 데이터를 다시 로드합니다."""
         self._initialized = False
         return await self.initialize(force_reload=True)
+
+    async def semantic_search(
+        self,
+        query: str,
+        category: Optional[str] = None,
+        limit: int = 5,
+        use_cache: bool = True,
+        distance_threshold: float = 0.15,
+    ) -> "FAQCacheResult":
+        """의미 기반 FAQ 검색 (캐싱 포함).
+
+        유사한 질문이 캐시에 있으면 캐시된 결과를 반환하고,
+        없으면 키워드 검색 후 결과를 캐싱합니다.
+
+        Args:
+            query: 검색할 질문
+            category: FAQ 카테고리 필터 (optional)
+            limit: 최대 결과 수
+            use_cache: 캐시 사용 여부
+            distance_threshold: 유사도 임계값 (낮을수록 엄격, 기본 0.15)
+
+        Returns:
+            FAQCacheResult: 검색 결과
+                - cache_hit: 캐시 히트 여부
+                - faqs: FAQ 검색 결과 리스트
+                - similarity_score: 캐시 히트 시 유사도 점수
+                - search_time_ms: 검색 소요 시간
+
+        Examples:
+            >>> result = await faq_service.semantic_search("VIP 되려면 어떻게 해요?")
+            >>> if result.cache_hit:
+            ...     print(f"Cache hit! similarity={result.similarity_score:.2f}")
+            >>> for faq in result.faqs:
+            ...     print(faq["question"])
+        """
+        from .faq_cache import get_faq_cache, FAQCacheResult
+
+        if not self._initialized:
+            await self.initialize()
+
+        # 캐시 사용 안 함
+        if not use_cache:
+            faqs = await self.search(query, limit)
+            if category:
+                faqs = [f for f in faqs if f.get("category") == category]
+            return FAQCacheResult(
+                query=query,
+                faqs=faqs,
+                cache_hit=False,
+                similarity_score=0.0,
+                cached_query="",
+                search_time_ms=0.0,
+            )
+
+        # 캐시를 통한 검색
+        cache = get_faq_cache()
+
+        async def fallback_search(q: str, cat: Optional[str]) -> List[Dict[str, Any]]:
+            """캐시 미스 시 키워드 검색 fallback."""
+            results = await self.search(q, limit)
+            if cat:
+                results = [f for f in results if f.get("category") == cat]
+            return results
+
+        result = await cache.search_with_cache(
+            query=query,
+            category=category,
+            fallback_search_func=fallback_search,
+            similarity_threshold=distance_threshold,
+        )
+
+        return result
+
+    async def get_cache_stats(self) -> Dict[str, Any]:
+        """FAQ 캐시 통계를 반환합니다."""
+        from .faq_cache import get_faq_cache
+
+        cache = get_faq_cache()
+        return await cache.get_cache_stats()
 
 
 # 싱글톤 인스턴스 getter

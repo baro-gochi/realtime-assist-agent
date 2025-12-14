@@ -6,6 +6,7 @@ Classes:
     RoomRepository: 룸/참가자 관련 데이터 저장
     TranscriptRepository: 대화 내용 저장
     SystemLogRepository: 시스템 로그 저장
+    CustomerRepository: 고객 정보 조회
 """
 
 import logging
@@ -443,3 +444,115 @@ class SystemLogRepository:
         except Exception as e:
             logger.error(f"Failed to cleanup old logs: {e}")
             return 0
+
+
+class CustomerRepository:
+    """고객 정보 데이터 저장소.
+
+    DB 연결이 안 되어 있으면 graceful degradation으로 None/빈 리스트 반환.
+    """
+
+    def __init__(self):
+        self.db = get_db_manager()
+
+    def _normalize_phone(self, phone: str) -> str:
+        """전화번호를 정규화합니다 (숫자만 추출 후 하이픈 형식으로 변환).
+
+        Args:
+            phone: 입력된 전화번호 (01012345678 또는 010-1234-5678)
+
+        Returns:
+            정규화된 전화번호 (010-1234-5678 형식)
+        """
+        import re
+        # 숫자만 추출
+        digits = re.sub(r'\D', '', phone)
+        # 010-XXXX-XXXX 형식으로 변환
+        if len(digits) == 11 and digits.startswith('010'):
+            return f"{digits[:3]}-{digits[3:7]}-{digits[7:]}"
+        return phone  # 형식이 맞지 않으면 원본 반환
+
+    async def find_customer(
+        self,
+        name: str,
+        phone_number: str
+    ) -> Optional[Dict[str, Any]]:
+        """이름과 전화번호로 고객을 조회합니다.
+
+        Args:
+            name: 고객 이름
+            phone_number: 휴대전화 번호 (01012345678 또는 010-1234-5678 둘 다 허용)
+
+        Returns:
+            고객 정보 딕셔너리 또는 None (DB 연결 안 됨 또는 조회 실패)
+        """
+        if not self.db.is_initialized:
+            logger.warning("Database not initialized, skipping customer lookup")
+            return None
+
+        # 전화번호 정규화 (DB 형식: 010-XXXX-XXXX)
+        normalized_phone = self._normalize_phone(phone_number)
+
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT
+                    customer_id, customer_name, phone_number,
+                    age, gender, residence,
+                    membership_grade, current_plan, monthly_fee,
+                    contract_status, bundle_info
+                FROM customers
+                WHERE customer_name = $1 AND phone_number = $2
+                """,
+                name, normalized_phone
+            )
+            if row:
+                logger.info(f"Found customer: {name} ({normalized_phone})")
+                return dict(row)
+            logger.info(f"Customer not found: {name} ({normalized_phone})")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to find customer '{name}': {e}")
+            return None
+
+    async def get_consultation_history(
+        self,
+        customer_id: int,
+        limit: int = 5
+    ) -> List[Dict[str, Any]]:
+        """고객의 최근 상담 이력을 조회합니다.
+
+        Args:
+            customer_id: 고객 ID
+            limit: 조회 개수 제한 (기본값: 5)
+
+        Returns:
+            상담 이력 리스트 (DB 연결 안 됨 시 빈 리스트)
+        """
+        if not self.db.is_initialized:
+            logger.warning("Database not initialized, skipping consultation history lookup")
+            return []
+
+        try:
+            rows = await self.db.fetch(
+                """
+                SELECT consultation_date, consultation_type, detail
+                FROM consultation_history
+                WHERE customer_id = $1
+                ORDER BY consultation_date DESC
+                LIMIT $2
+                """,
+                customer_id, limit
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                # consultation_date를 문자열로 변환
+                if item.get('consultation_date'):
+                    item['consultation_date'] = str(item['consultation_date'])
+                result.append(item)
+            logger.info(f"Found {len(result)} consultation history for customer {customer_id}")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get consultation history for customer {customer_id}: {e}")
+            return []
