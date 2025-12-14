@@ -16,7 +16,13 @@ Functions:
 Config:
     llm_config: LLM 모델 설정
     agent_behavior_config: 에이전트 동작 설정
-    prompt_config: 시스템 프롬프트 설정
+    redis_cache_config: Redis 캐싱 설정
+
+Caching:
+    setup_global_llm_cache: 전역 LLM 캐시 설정
+    get_llm_cache: LLM 캐시 인스턴스 반환
+    clear_llm_cache: 캐시 클리어
+    get_cache_stats: 캐시 상태 정보
 """
 
 from .graph import (
@@ -29,14 +35,21 @@ from .manager import (
     RoomAgent,
     get_or_create_agent,
     remove_agent,
-    get_all_agents,
     room_agents,
 )
 from .config import (
     llm_config,
     agent_behavior_config,
+    redis_cache_config,
     LLMConfig,
     AgentBehaviorConfig,
+    RedisCacheConfig,
+)
+from .cache import (
+    setup_global_llm_cache,
+    get_llm_cache,
+    clear_llm_cache,
+    get_cache_stats,
 )
 
 __all__ = [
@@ -49,12 +62,17 @@ __all__ = [
     "RoomAgent",
     "get_or_create_agent",
     "remove_agent",
-    "get_all_agents",
     "room_agents",
     # Config
     "llm_config",
     "agent_behavior_config",
-    "prompt_config",
+    "redis_cache_config",
     "LLMConfig",
     "AgentBehaviorConfig",
+    "RedisCacheConfig",
+    # Cache
+    "setup_global_llm_cache",
+    "get_llm_cache",
+    "clear_llm_cache",
+    "get_cache_stats",
 ]

@@ -62,11 +62,10 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Depends, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, List
 import httpx
 
-from modules import PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager, DatabaseLogHandler
-from modules import consultation_router, comparison_router, faq_router
+from modules import PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager, DatabaseLogHandler, CustomerRepository
 from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 from pathlib import Path
@@ -191,10 +190,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include consultation module routers (RAG-based consultation support)
-app.include_router(consultation_router, prefix="/api")
-app.include_router(comparison_router, prefix="/api")
-app.include_router(faq_router, prefix="/api")
 
 
 class SignalingMessage(BaseModel):
@@ -278,6 +273,132 @@ async def get_rooms():
         }
     """
     return {"rooms": room_manager.get_room_list()}
+
+
+# =============================================================================
+# Scenario Test API (for testing without STT)
+# =============================================================================
+
+class ScenarioTestRequest(BaseModel):
+    """시나리오 테스트 요청 모델."""
+    scenario: List[dict]  # [{"speaker": "고객", "text": "..."}, ...]
+    customer_info: dict = {}
+
+@app.post("/api/test/scenario")
+async def test_scenario(request: ScenarioTestRequest):
+    """시나리오를 실행하고 에이전트 응답을 반환합니다.
+
+    STT 없이 텍스트 시나리오로 에이전트를 테스트합니다.
+
+    Args:
+        request: 시나리오 데이터와 고객 정보
+
+    Returns:
+        dict: 각 발화에 대한 에이전트 응답 리스트
+    """
+    from modules.agent.graph import create_agent_graph
+    from langchain_openai import ChatOpenAI
+
+    # LLM 초기화
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+    graph = create_agent_graph(llm)
+
+    # 기본 고객 정보
+    customer_info = request.customer_info or {
+        "customer_name": "윤지현",
+        "membership_grade": "Gold",
+        "current_plan": "인기LTE 데이터ON - 비디오 플러스 69,000원",
+        "monthly_fee": 69000,
+    }
+
+    # 초기 상태
+    state = {
+        "messages": [],
+        "customer_info": customer_info,
+        "conversation_history": [],
+        "summary_result": None,
+        "intent_result": None,
+        "rag_policy_result": None,
+        "sentiment_result": None,
+        "risk_result": None,
+        "draft_replies": None,
+        "processed_turn_ids": set(),
+        "last_customer_text": "",
+    }
+
+    results = []
+
+    for i, turn in enumerate(request.scenario):
+        speaker = turn.get("speaker", "")
+        text = turn.get("text", "")
+
+        # 대화 기록에 추가
+        role = "고객" if speaker == "고객" else "상담사"
+        state["conversation_history"].append({
+            "role": role,
+            "content": text,
+            "timestamp": i
+        })
+
+        # 고객 발화일 때만 에이전트 실행
+        if speaker == "고객":
+            state["last_customer_text"] = text
+            state["processed_turn_ids"] = set()  # 새 턴
+
+            # 그래프 실행
+            result = await graph.ainvoke(state)
+            state = result
+
+            # 결과 수집
+            turn_result = {
+                "turn": i + 1,
+                "speaker": speaker,
+                "text": text,
+                "agent_response": {
+                    "intent": result.get("intent_result"),
+                    "rag_policy": None,
+                    "sentiment": result.get("sentiment_result"),
+                    "summary": result.get("summary_result"),
+                }
+            }
+
+            # RAG 결과 정리
+            if result.get("rag_policy_result"):
+                rp = result["rag_policy_result"]
+                recommendations = []
+                for rec in (rp.get("recommendations") or [])[:3]:
+                    meta = rec.get("metadata", {})
+                    search_text = meta.get("search_text", "")
+                    data_info = voice_info = ""
+                    if search_text:
+                        for p in search_text.split("|"):
+                            p = p.strip()
+                            if not data_info and p.startswith("데이터"):
+                                data_info = p
+                            elif not voice_info and p.startswith("음성"):
+                                voice_info = p
+                    recommendations.append({
+                        "title": rec.get("title"),
+                        "price": meta.get("monthly_price"),
+                        "data": data_info,
+                        "voice": voice_info,
+                        "reason": rec.get("recommendation_reason"),
+                    })
+                turn_result["agent_response"]["rag_policy"] = {
+                    "intent": rp.get("intent_label"),
+                    "recommendations": recommendations,
+                }
+
+            results.append(turn_result)
+        else:
+            results.append({
+                "turn": i + 1,
+                "speaker": speaker,
+                "text": text,
+                "agent_response": None
+            })
+
+    return {"results": results, "final_summary": state.get("summary_result")}
 
 
 @app.post("/api/auth/verify")
@@ -713,9 +834,10 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         """
         logger.info(f"[{source.upper()}] Transcript from {peer_id} in room '{room_name}': {transcript}")
 
-        # Get peer nickname
+        # Get peer info (nickname, is_customer)
         peer_info = room_manager.get_peer(peer_id)
         nickname = peer_info.nickname if peer_info else "Unknown"
+        is_customer = peer_info.is_customer if peer_info else False
 
         # Save transcript to room history (only for Google to avoid duplicates)
         import time
@@ -757,26 +879,48 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 logger.warning(f"No agent found for room '{room_name}', skipping summary")
                 return
 
-            # 요약 실행 주기: 첫 최종 1회 + 이후 3회마다
-            should_run_summary = False
+            # 에이전트 실행 정책:
+            # TODO: 테스트 완료 후 주기적 실행으로 복원
+            # - 현재: 모든 최종 발화에 대해 에이전트 실행
+            # - 원래: 고객 발화는 매번, 상담사 발화는 3회에 1번
+            should_run_summary = is_final  # 최종 발화면 항상 실행
+
             if is_final:
                 summary_counters[room_name] += 1
-                count = summary_counters[room_name]
-                should_run_summary = (count == 1) or (count % 3 == 0)
 
             logger.info(
                 f"Running agent for room '{room_name}' "
-                f"(should_run_summary={should_run_summary}, count={summary_counters.get(room_name, 0)})"
+                f"(should_run_summary={should_run_summary}, is_final={is_final}, is_customer={is_customer})"
             )
             logger.info(f"Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
 
-            # 비스트리밍 모드로 에이전트 실행 (JSON 응답)
+            turn_id = f"{room_name}-{int(current_time * 1000)}"
+
+            async def handle_agent_update(chunk: dict):
+                """LangGraph node 업데이트를 즉시 WebSocket으로 브로드캐스트."""
+                try:
+                    await broadcast_to_room(
+                        room_name,
+                        {
+                            "type": "agent_update",
+                            "turn_id": chunk.get("turn_id"),
+                            "node": chunk.get("node"),
+                            "data": chunk.get("data"),
+                        }
+                    )
+                except Exception as err:
+                    logger.error(f"Failed to broadcast agent update: {err}")
+
+            # 스트리밍 모드로 에이전트 실행 (노드별 업데이트 즉시 브로드캐스트)
             result = await agent.on_new_transcript(
                 peer_id,
                 nickname,
                 transcript,
                 current_time,
-                run_summary=should_run_summary
+                run_summary=should_run_summary,
+                on_update=handle_agent_update,
+                turn_id=turn_id,
+                is_customer=is_customer
             )
 
             # 에러 체크
@@ -800,6 +944,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 room_name,
                 {
                     "type": "agent_update",
+                    "turn_id": turn_id,
                     "node": "summarize",
                     "data": {
                         "summary": summary_payload.get("summary", ""),
@@ -827,6 +972,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 # Handle room join
                 room_name = data.get("data", {}).get("room_name")
                 nickname = data.get("data", {}).get("nickname", "Anonymous")
+                phone_number = data.get("data", {}).get("phone_number")
 
                 if not room_name:
                     await websocket.send_json({
@@ -835,8 +981,23 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     })
                     continue
 
-                # Join room
-                room_manager.join_room(room_name, peer_id, nickname, websocket)
+                # 고객 정보 조회 (phone_number가 있는 경우 = 고객인 경우)
+                customer_info = None
+                consultation_history = []
+                if phone_number:
+                    customer_repo = CustomerRepository()
+                    customer_info = await customer_repo.find_customer(nickname, phone_number)
+                    if customer_info:
+                        consultation_history = await customer_repo.get_consultation_history(
+                            customer_info['customer_id']
+                        )
+                        logger.info(f"Found customer '{nickname}' with {len(consultation_history)} consultation history")
+                    else:
+                        logger.info(f"Customer not found: '{nickname}' ({phone_number})")
+
+                # Join room (phone_number가 있으면 고객으로 판별)
+                is_customer = phone_number is not None
+                room_manager.join_room(room_name, peer_id, nickname, websocket, is_customer=is_customer)
                 current_room = room_name
 
                 # 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
@@ -876,19 +1037,29 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     }
                 })
 
-                # Notify other peers in room
+                # Notify other peers in room (with customer info if available)
+                user_joined_data = {
+                    "peer_id": peer_id,
+                    "nickname": nickname,
+                    "peer_count": room_manager.get_room_count(room_name)
+                }
+                if customer_info:
+                    user_joined_data["customer_info"] = customer_info
+                if consultation_history:
+                    user_joined_data["consultation_history"] = consultation_history
+
                 await broadcast_to_room(
                     room_name,
                     {
                         "type": "user_joined",
-                        "data": {
-                            "peer_id": peer_id,
-                            "nickname": nickname,
-                            "peer_count": room_manager.get_room_count(room_name)
-                        }
+                        "data": user_joined_data
                     },
                     exclude=[peer_id]
                 )
+
+                # 에이전트에 고객 컨텍스트 설정
+                if agent and customer_info:
+                    agent.set_customer_context(customer_info, consultation_history)
 
                 # Renegotiation will be triggered when tracks are actually received
                 # on_track_received 콜백에서 트랙 수신 시 자동으로 renegotiation 요청됨
@@ -990,6 +1161,55 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     exclude=[peer_id]
                 )
 
+            elif message_type == "end_session":
+                # Handle consultation session end (save to DB)
+                if current_room:
+                    logger.info(f"Ending session for room '{current_room}'")
+                    try:
+                        agent = room_agents.get(current_room)
+                        if agent and agent.session_id:
+                            # End the session - LLM will generate structured final summary
+                            success = await agent.end_session()
+                            logger.info(f"Session ended for room '{current_room}': success={success}")
+
+                            await websocket.send_json({
+                                "type": "session_ended",
+                                "data": {
+                                    "success": success,
+                                    "session_id": str(agent.session_id) if agent.session_id else None,
+                                    "message": "Consultation session saved successfully" if success else "Failed to save session"
+                                }
+                            })
+                        else:
+                            logger.warning(f"No agent or session for room '{current_room}'")
+                            await websocket.send_json({
+                                "type": "session_ended",
+                                "data": {
+                                    "success": True,
+                                    "session_id": None,
+                                    "message": "No session to save"
+                                }
+                            })
+                    except Exception as e:
+                        logger.error(f"Error ending session for room '{current_room}': {e}")
+                        await websocket.send_json({
+                            "type": "session_ended",
+                            "data": {
+                                "success": False,
+                                "session_id": None,
+                                "message": f"Error: {str(e)}"
+                            }
+                        })
+                else:
+                    await websocket.send_json({
+                        "type": "session_ended",
+                        "data": {
+                            "success": True,
+                            "session_id": None,
+                            "message": "Not in a room"
+                        }
+                    })
+
             elif message_type == "leave_room":
                 # Handle room leave
                 if current_room:
@@ -1021,56 +1241,16 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "data": {"rooms": room_manager.get_room_list()}
                 })
 
-            elif message_type == "agent_task":
-                task_payload = data.get("data", {})
-                task_type = task_payload.get("task")
-                target_room = task_payload.get("room_name") or current_room
-                user_options = task_payload.get("user_options")
-
-                if task_type != "consultation":
-                    await websocket.send_json({
-                        "type": "agent_error",
-                        "data": {"task": task_type, "message": "unsupported task"}
-                    })
+            elif message_type == "text_input":
+                # Handle manual text input (for testing without STT)
+                if not current_room:
+                    logger.warning(f"Peer {peer_id} tried to send text without joining a room")
                     continue
 
-                if not target_room:
-                    await websocket.send_json({
-                        "type": "agent_error",
-                        "data": {"task": task_type, "message": "room is required"}
-                    })
-                    continue
-
-                # 진행 상태 알림
-                await websocket.send_json({
-                    "type": "agent_status",
-                    "data": {"task": "consultation", "status": "processing"}
-                })
-
-                try:
-                    agent = get_or_create_agent(target_room)
-                    result = await agent.run_consultation(user_options=user_options)
-
-                    if "error" in result:
-                        await websocket.send_json({
-                            "type": "agent_error",
-                            "data": {"task": "consultation", "message": result["error"]["message"]}
-                        })
-                        continue
-
-                    await broadcast_to_room(
-                        target_room,
-                        {
-                            "type": "agent_consultation",
-                            "data": result.get("consultation_result", {})
-                        }
-                    )
-                except Exception as e:
-                    logger.error(f"Consultation task failed: {e}", exc_info=True)
-                    await websocket.send_json({
-                        "type": "agent_error",
-                        "data": {"task": "consultation", "message": str(e)}
-                    })
+                text = data.get("data", {}).get("text", "").strip()
+                if text:
+                    logger.info(f"[TEXT_INPUT] Manual text from {peer_id}: {text}")
+                    await on_transcript(peer_id, current_room, text, source="manual", is_final=True)
 
             else:
                 logger.warning(f"Unknown message type from {peer_id}: {message_type}")
