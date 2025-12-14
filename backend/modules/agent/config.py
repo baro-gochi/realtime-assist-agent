@@ -1,6 +1,6 @@
 """Agent 모듈 설정.
 
-LangGraph 에이전트 관련 LLM 설정값.
+LangGraph 에이전트 관련 LLM 설정값 및 Redis 캐싱 설정.
 """
 
 import os
@@ -43,7 +43,7 @@ class LLMConfig:
 
     # 최대 토큰 수
     MAX_TOKENS: int = field(
-        default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "150"))
+        default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "200"))
     )
     
     # 추론 노력 수준
@@ -55,6 +55,34 @@ class LLMConfig:
     def model_name(self) -> str:
         """모델 이름만 반환."""
         return self.MODEL.split(":")[-1] if ":" in self.MODEL else self.MODEL
+
+# ============================================================
+# 최종 요약 전용 LLM 설정
+# ============================================================
+
+@dataclass
+class SummaryLLMConfig:
+    """최종 요약 생성 전용 LLM 설정.
+
+    세션 종료 시 구조화된 최종 요약을 생성하는 LLM 설정.
+    실시간 분석용 LLM과 별도로 설정 가능.
+    """
+
+    # 모델 식별자 (기본값: 실시간 LLM과 동일)
+    MODEL: str = field(
+        default_factory=lambda: os.getenv("SUMMARY_LLM_MODEL", "openai:gpt-5-mini")
+    )
+
+    # 모델 온도 (요약은 일관성을 위해 낮은 온도 권장)
+    TEMPERATURE: float = field(
+        default_factory=lambda: float(os.getenv("SUMMARY_LLM_TEMPERATURE", "0"))
+    )
+
+    @property
+    def model_name(self) -> str:
+        """모델 이름만 반환."""
+        return self.MODEL.split(":")[-1] if ":" in self.MODEL else self.MODEL
+
 
 # ============================================================
 # 에이전트 동작 설정
@@ -81,11 +109,63 @@ class AgentBehaviorConfig:
 
 
 # ============================================================
+# Redis LLM 캐싱 설정
+# ============================================================
+
+@dataclass
+class RedisCacheConfig:
+    """Redis LLM 캐싱 설정.
+
+    OpenAI Rate Limit 방어 및 지연 시간 단축을 위한 캐싱 설정.
+    - RedisSemanticCache: 유사 프롬프트 캐싱 (의미적 유사도 기반)
+    - RedisCache: 정확히 동일한 프롬프트 캐싱 (문자열 일치)
+
+    OpenAI Implicit Prompt Caching:
+    - 정적 접두사(System Message)를 동일하게 유지하면 OpenAI 백엔드에서 자동 캐싱
+    - Time-to-First-Token 감소 및 비용 절감 효과
+    """
+
+    # Redis 연결 URL
+    REDIS_URL: str = field(
+        default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379")
+    )
+
+    # 캐시 활성화 여부
+    CACHE_ENABLED: bool = field(
+        default_factory=lambda: os.getenv("LLM_CACHE_ENABLED", "true").lower() == "true"
+    )
+
+    # 캐시 타입: "semantic" (유사도 기반) 또는 "exact" (정확 일치)
+    CACHE_TYPE: str = field(
+        default_factory=lambda: os.getenv("LLM_CACHE_TYPE", "semantic")
+    )
+
+    # 캐시 TTL (초) - 기본 1시간
+    CACHE_TTL: int = field(
+        default_factory=lambda: int(os.getenv("LLM_CACHE_TTL", "3600"))
+    )
+
+    # 시맨틱 캐시 유사도 임계값 (0~1, 낮을수록 엄격)
+    # 0.1 = 매우 유사한 프롬프트만 캐시 히트
+    # 0.2 = 적당히 유사한 프롬프트도 캐시 히트
+    SEMANTIC_DISTANCE_THRESHOLD: float = field(
+        default_factory=lambda: float(os.getenv("LLM_CACHE_DISTANCE_THRESHOLD", "0.15"))
+    )
+
+    # 캐시 인덱스 이름 (Redis key prefix)
+    CACHE_NAME: str = field(
+        default_factory=lambda: os.getenv("LLM_CACHE_NAME", "kt_agent_llm_cache")
+    )
+
+
+# ============================================================
 # 싱글톤 인스턴스
 # ============================================================
 
 llm_config = LLMConfig()
+summary_llm_config = SummaryLLMConfig()
 agent_behavior_config = AgentBehaviorConfig()
+redis_cache_config = RedisCacheConfig()
 
 
 # ============================================================
@@ -97,3 +177,7 @@ logger.info(f"[Agent Config] LLM 모델: {llm_config.MODEL}")
 logger.info(f"[Agent Config] Temperature: {llm_config.TEMPERATURE}")
 logger.info(f"[Agent Config] Max Tokens: {llm_config.MAX_TOKENS}")
 logger.info(f"[Agent Config] Reasoning Effort: {llm_config.REASONING_EFFORT}")
+logger.info(f"[Agent Config] Summary LLM 모델: {summary_llm_config.MODEL}")
+logger.info(f"[Agent Config] Summary Temperature: {summary_llm_config.TEMPERATURE}")
+logger.info(f"[Agent Config] Redis Cache Enabled: {redis_cache_config.CACHE_ENABLED}")
+logger.info(f"[Agent Config] Redis Cache Type: {redis_cache_config.CACHE_TYPE}")
