@@ -112,6 +112,7 @@ export class WebRTCClient {
     this.onLocalStream = null; // 로컬 스트림 획득 콜백
     this.onAgentConsultation = null; // 상담 가이드 결과
     this.onAgentStatus = null; // 상담 진행 상태
+    this.onSessionEnded = null; // 세션 종료 결과 콜백
 
     // Prefetch TURN 자격 증명 on construction
     this.prefetchTurnCredentials();
@@ -347,6 +348,7 @@ export class WebRTCClient {
         console.log('🤖 Agent update - node:', message.node, 'data:', message.data);
         if (this.onAgentUpdate) {
           this.onAgentUpdate({
+            turnId: message.turn_id,
             node: message.node,
             data: message.data
           });
@@ -367,6 +369,13 @@ export class WebRTCClient {
         console.error('🤖 Agent error:', data);
         if (this.onAgentStatus) this.onAgentStatus({ task: data.task, status: 'error' });
         if (this.onError) this.onError(new Error(data.message || 'Agent error'));
+        break;
+
+      case 'session_ended':
+        console.log('📝 Session ended:', data);
+        if (this.onSessionEnded) {
+          this.onSessionEnded(data);
+        }
         break;
 
       case 'error':
@@ -405,7 +414,7 @@ export class WebRTCClient {
    * - 여러 룸을 동시에 운영 가능
    * - 빈 룸은 자동으로 삭제됨
    */
-  async joinRoom(roomName, nickname) {
+  async joinRoom(roomName, nickname, phoneNumber = null) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected');
     }
@@ -413,12 +422,19 @@ export class WebRTCClient {
     this.roomName = roomName;
     this.nickname = nickname;
 
-    this.sendMessage('join_room', {
+    const joinData = {
       room_name: roomName,
       nickname: nickname
-    });
+    };
 
-    console.log(`Joining room '${roomName}' as '${nickname}'`);
+    // 고객인 경우 전화번호 추가
+    if (phoneNumber) {
+      joinData.phone_number = phoneNumber;
+    }
+
+    this.sendMessage('join_room', joinData);
+
+    console.log(`Joining room '${roomName}' as '${nickname}'${phoneNumber ? ` (phone: ${phoneNumber})` : ''}`);
   }
 
   /**
@@ -840,6 +856,36 @@ export class WebRTCClient {
       task: 'consultation',
       room_name: roomName,
       user_options: userOptions
+    });
+  }
+
+  /**
+   * 상담 세션을 종료하고 데이터를 저장합니다.
+   * @returns {Promise<{success: boolean, session_id: string|null, message: string}>}
+   */
+  endSession() {
+    return new Promise((resolve) => {
+      // Set up one-time handler for session_ended response
+      const originalHandler = this.onSessionEnded;
+      this.onSessionEnded = (data) => {
+        // Restore original handler
+        this.onSessionEnded = originalHandler;
+        if (originalHandler) originalHandler(data);
+        resolve(data);
+      };
+
+      // Set timeout for response
+      const timeout = setTimeout(() => {
+        this.onSessionEnded = originalHandler;
+        resolve({
+          success: false,
+          session_id: null,
+          message: 'Session end request timed out'
+        });
+      }, 10000);
+
+      // Send end_session message
+      this.sendMessage('end_session', {});
     });
   }
 

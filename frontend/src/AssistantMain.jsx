@@ -5,21 +5,25 @@
  * 상담사를 위한 AI 어시스턴트 대시보드 컴포넌트입니다.
  * 실시간 STT, 연결 정보, 대화 내역, AI 추천 답변 등을 표시합니다.
  *
- * 주요 기능:
- * 1. 상담사/고객 역할 선택
- * 2. 상담사: 방 생성, 고객: 방 목록에서 선택
- * 3. 실시간 음성 인식 및 대화 표시
- * 4. 연결된 상대방 정보 표시
- * 5. AI 추천 답변 (RAG 기반)
+ * 레이아웃 구조:
+ * - 상단바: 통화 정보 / 타이머 / 감정 온도 / 위험 알림
+ * - 좌측: 실시간 전사 (말풍선 UI)
+ * - 중앙: 핵심 인사이트 (의도, 요약, 감정)
+ * - 우측: 응답 초안 / RAG 정책 / 알림
  */
 
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { WebRTCClient } from './webrtc';
 import './AssistantMain.css';
 
 function AssistantMain() {
+  const defaultAssistCards = () => [];
+
   // 역할 선택 ('agent' | 'customer' | null)
   const [userRole, setUserRole] = useState(null);
+
+  // 다크모드
+  const [isDarkMode, setIsDarkMode] = useState(false);
 
   // WebRTC 상태
   const [isConnected, setIsConnected] = useState(false);
@@ -40,7 +44,7 @@ function AssistantMain() {
 
   // 통화 시간 타이머
   const [callDuration, setCallDuration] = useState(0);
-  const [callStartTime, setCallStartTime] = useState(null); // 통화 시작 시간 (timestamp)
+  const [callStartTime, setCallStartTime] = useState(null);
   const callTimerRef = useRef(null);
 
   // STT 트랜스크립트
@@ -48,12 +52,16 @@ function AssistantMain() {
   const transcriptContainerRef = useRef(null);
 
   // AI 에이전트 요약 (JSON 파싱)
-  const [parsedSummary, setParsedSummary] = useState(null); // {summary, customer_issue, agent_action}
-  const [summaryTimestamp, setSummaryTimestamp] = useState(null); // 요약 수신 시간
-  const [llmStatus, setLlmStatus] = useState('connecting'); // 'connecting' | 'ready' | 'connected' | 'failed'
-  const [consultationStatus, setConsultationStatus] = useState('idle'); // idle | processing | done | error
-  const [consultationResult, setConsultationResult] = useState(null); // {guide, recommendations, citations}
+  const [parsedSummary, setParsedSummary] = useState(null);
+  const [summaryTimestamp, setSummaryTimestamp] = useState(null);
+  const [llmStatus, setLlmStatus] = useState('connecting');
+  const [consultationStatus, setConsultationStatus] = useState('idle');
+  const [consultationResult, setConsultationResult] = useState(null);
   const [consultationError, setConsultationError] = useState('');
+  const [assistCards, setAssistCards] = useState(defaultAssistCards);
+  const [agentUpdates, setAgentUpdates] = useState({});
+  const [latestTurnId, setLatestTurnId] = useState(null);
+
 
   // WebRTC ref
   const webrtcClientRef = useRef(null);
@@ -62,27 +70,62 @@ function AssistantMain() {
   // 폼 입력값
   const [roomInput, setRoomInput] = useState('');
   const [nicknameInput, setNicknameInput] = useState('');
+  const [phoneInput, setPhoneInput] = useState('');
+
+  // 고객 정보 (DB 조회 결과)
+  const [customerInfo, setCustomerInfo] = useState(null);
+  const [consultationHistory, setConsultationHistory] = useState([]);
 
   // 오디오 상태
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+
+  // 세션 저장 상태
+  const [isSavingSession, setIsSavingSession] = useState(false);
+  const [saveSessionResult, setSaveSessionResult] = useState(null);
+
+  // 좌측 패널 카드 접기/펼치기 상태
+  const [customerInfoCollapsed, setCustomerInfoCollapsed] = useState(false);
+  const [conversationCollapsed, setConversationCollapsed] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(true);
+
+  // 좌측 패널 표시/숨김 상태
+  const [leftPanelVisible, setLeftPanelVisible] = useState(true);
+
+  // 중앙 패널 인사이트 카드 접기/펼치기 상태
+  const [intentCardCollapsed, setIntentCardCollapsed] = useState(false);
+  const [summaryCardCollapsed, setSummaryCardCollapsed] = useState(false);
+  const [emotionCardCollapsed, setEmotionCardCollapsed] = useState(false);
+
+  // RAG 카드 표시 상태: 처음 2개만 표시, "더 보기"로 확장
+  const [ragCardVisibleCount, setRagCardVisibleCount] = useState(2);
+  const [newRagCardIds, setNewRagCardIds] = useState(new Set());
 
   // Web Audio API (볼륨 증폭용)
   const audioContextRef = useRef(null);
   const gainNodeRef = useRef(null);
 
   /**
+   * 다크 모드 토글
+   */
+  const toggleDarkMode = () => {
+    setIsDarkMode(!isDarkMode);
+  };
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
+  /**
    * WebRTC 클라이언트 초기화
    */
   useEffect(() => {
-    // 환경변수 우선, 없으면 현재 호스트 기반 URL 사용
     const wsUrl = import.meta.env.VITE_WS_URL ||
       `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
-    console.log('🔗 WebSocket URL:', wsUrl);
+    console.log('WebSocket URL:', wsUrl);
     const client = new WebRTCClient(wsUrl);
     webrtcClientRef.current = client;
 
-    // 이벤트 핸들러 설정
     client.onPeerId = (id) => {
       setPeerId(id);
       console.log('Peer ID set:', id);
@@ -103,6 +146,14 @@ function AssistantMain() {
         peer_id: data.peer_id,
         nickname: data.nickname
       }]);
+      if (data.customer_info) {
+        setCustomerInfo(data.customer_info);
+        console.log('Customer info received:', data.customer_info);
+      }
+      if (data.consultation_history) {
+        setConsultationHistory(data.consultation_history);
+        console.log('Consultation history received:', data.consultation_history);
+      }
     };
 
     client.onUserLeft = (data) => {
@@ -114,44 +165,35 @@ function AssistantMain() {
     };
 
     client.onRemoteStream = (stream) => {
-      console.log('🎤 Remote audio stream received');
+      console.log('Remote audio stream received');
 
-      // Web Audio API를 사용하여 볼륨 증폭
       try {
-        // 기존 AudioContext 정리
         if (audioContextRef.current) {
           audioContextRef.current.close().catch(() => {});
         }
 
-        // 새 AudioContext 생성
         const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-          latencyHint: 'interactive',  // 낮은 지연 모드
-          sampleRate: 48000            // 48kHz 샘플레이트
+          latencyHint: 'interactive',
+          sampleRate: 48000
         });
         audioContextRef.current = audioContext;
 
-        // 스트림을 AudioContext에 연결
         const source = audioContext.createMediaStreamSource(stream);
-
-        // GainNode로 볼륨 증폭 (2.5배)
         const gainNode = audioContext.createGain();
         gainNode.gain.value = 2.5;
         gainNodeRef.current = gainNode;
 
-        // 연결: source → gain → destination (스피커)
         source.connect(gainNode);
         gainNode.connect(audioContext.destination);
 
-        console.log('🔊 Audio amplified with gain:', gainNode.gain.value);
+        console.log('Audio amplified with gain:', gainNode.gain.value);
 
-        // 숨겨진 audio 요소에도 연결 (폴백용)
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = stream;
-          remoteAudioRef.current.volume = 0; // Web Audio API 사용하므로 0으로
+          remoteAudioRef.current.volume = 0;
         }
       } catch (err) {
-        console.error('❌ Web Audio API failed, using fallback:', err);
-        // 폴백: 일반 audio 요소 사용
+        console.error('Web Audio API failed, using fallback:', err);
         if (remoteAudioRef.current && remoteAudioRef.current.srcObject !== stream) {
           remoteAudioRef.current.srcObject = stream;
           remoteAudioRef.current.volume = 1.0;
@@ -170,63 +212,52 @@ function AssistantMain() {
       console.error('WebRTC error:', err);
     };
 
-    // STT transcript 이벤트 핸들러
     client.onTranscript = (data) => {
-      console.log('💬 Transcript received:', data);
+      console.log('Transcript received:', data);
       setTranscripts(prev => [...prev, {
         peer_id: data.peer_id,
         nickname: data.nickname,
         text: data.text,
         timestamp: data.timestamp || Date.now(),
-        receivedAt: Date.now() // 수신 시간 (UI 표시용)
+        receivedAt: Date.now()
       }]);
     };
 
-    // AI 에이전트 준비 완료 이벤트 핸들러
     client.onAgentReady = (data) => {
-      console.log('🤖 Agent ready:', data);
+      console.log('Agent ready:', data);
       if (data.llm_available) {
         setLlmStatus('ready');
-        console.log('✅ LLM available, ready for summarization');
+        console.log('LLM available, ready for summarization');
       } else {
         setLlmStatus('failed');
-        console.warn('⚠️ LLM not available');
+        console.warn('LLM not available');
       }
     };
 
-    // AI 에이전트 업데이트 이벤트 핸들러 (JSON 파싱)
     client.onAgentUpdate = (data) => {
-      console.log('🤖 Agent update received:', JSON.stringify(data, null, 2));
+      console.log('Agent update received:', JSON.stringify(data, null, 2));
 
-      if (!data || data.node !== 'summarize') {
-        return;
-      }
+      if (!data) return;
 
-      const summaryData = data.data || {};
-      const parsed = {
-        summary: summaryData.summary || '',
-        customer_issue: summaryData.customer_issue || '',
-        agent_action: summaryData.agent_action || ''
-      };
+      const turnId = data.turnId || data.turn_id || 'default';
+      const node = data.node;
+      const payload = data.data || {};
 
-      // raw가 JSON 문자열일 경우만 파싱 시도 (호환성)
-      if ((!parsed.summary || !parsed.customer_issue || !parsed.agent_action) && summaryData.raw) {
-        try {
-          const json = JSON.parse(summaryData.raw);
-          parsed.summary = parsed.summary || json.summary || '';
-          parsed.customer_issue = parsed.customer_issue || json.customer_issue || '';
-          parsed.agent_action = parsed.agent_action || json.agent_action || '';
-        } catch (e) {
-          console.warn('⚠️ Failed to parse raw summary JSON:', e.message);
-        }
-      }
+      setAgentUpdates((prev) => {
+        const turnBucket = prev[turnId] || {};
+        return {
+          ...prev,
+          [turnId]: {
+            ...turnBucket,
+            [node]: payload,
+          },
+        };
+      });
 
+      setLatestTurnId(turnId);
       setLlmStatus('connected');
-      setSummaryTimestamp(Date.now());
-      setParsedSummary(parsed);
     };
 
-    // 상담 가이드 상태 업데이트
     client.onAgentStatus = (data) => {
       if (!data) return;
       if (data.status === 'processing') {
@@ -238,9 +269,8 @@ function AssistantMain() {
       }
     };
 
-    // 상담 가이드 결과 수신
     client.onAgentConsultation = (data) => {
-      console.log('📑 Consultation result:', data);
+      console.log('Consultation result:', data);
       if (!data) return;
       setConsultationStatus('done');
       setConsultationError('');
@@ -252,11 +282,9 @@ function AssistantMain() {
       });
     };
 
-    // 브라우저 종료/새로고침 시 즉시 정리 (beforeunload)
     const handleBeforeUnload = () => {
-      console.log('🔴 beforeunload: Cleaning up WebRTC connection...');
+      console.log('beforeunload: Cleaning up WebRTC connection...');
       if (client) {
-        // leaveRoom을 호출하여 서버에 즉시 알림
         client.leaveRoom();
         client.disconnect();
       }
@@ -280,6 +308,197 @@ function AssistantMain() {
       transcriptContainerRef.current.scrollTop = transcriptContainerRef.current.scrollHeight;
     }
   }, [transcripts]);
+
+  /**
+   * 상담 가이드 수신 시 우측 스택에 카드 추가
+   */
+  useEffect(() => {
+    if (!consultationResult || !consultationResult.generated_at) return;
+    const cardId = `guide-${consultationResult.generated_at}`;
+    setAssistCards((prev) => {
+      if (prev.some((c) => c.id === cardId)) return prev;
+      return [
+        {
+          id: cardId,
+          title: '상담 가이드 업데이트',
+          type: 'guide',
+          content: consultationResult.guide?.[0] || '가이드가 도착했습니다.',
+          collapsed: false,
+        },
+        ...prev,
+      ];
+    });
+  }, [consultationResult]);
+
+  /**
+   * RAG 정책 검색 결과 수신 시 우측 스택에 카드 추가
+   *
+   * 백엔드 응답 구조:
+   * rag_policy_result: {
+   *   skipped: boolean,
+   *   intent_label: string,
+   *   query: string,
+   *   searched_classifications: string[],
+   *   search_context: string,
+   *   recommendations: [{
+   *     collection, title, content, relevance_score,
+   *     metadata: { monthly_price, target_segment, search_text, ... },
+   *     recommendation_reason
+   *   }]
+   * }
+   */
+  useEffect(() => {
+    if (!latestTurnId) return;
+
+    const bucket = agentUpdates[latestTurnId] || {};
+    const ragData = bucket.rag_policy || {};
+
+    // rag_policy_result에서 데이터 추출
+    const ragResult = ragData.rag_policy_result || ragData;
+
+    // skipped 상태이거나 추천이 없으면 무시
+    if (ragResult.skipped || !ragResult.recommendations?.length) return;
+
+    const recommendations = ragResult.recommendations || [];
+    const cardId = `rag-${latestTurnId}`;
+
+    setAssistCards((prev) => {
+      if (prev.some((c) => c.id === cardId || c.id.startsWith(`${cardId}-`))) return prev;
+
+      const newCards = [];
+      const newCardIds = [];
+
+      // 상위 추천 문서 카드 추가 (최대 5개)
+      recommendations.slice(0, 5).forEach((rec, idx) => {
+        const metadata = rec.metadata || {};
+        const monthlyPrice = metadata.monthly_price;
+        const searchText = metadata.search_text || '';
+
+        // search_text에서 주요 정보 추출 (데이터, 음성 등)
+        let briefInfo = '';
+        if (searchText) {
+          const parts = searchText.split('|').slice(0, 2);
+          briefInfo = parts.map(p => p.trim()).join(' / ');
+        }
+
+        const cardIdWithIdx = `${cardId}-rec-${idx}`;
+        newCardIds.push(cardIdWithIdx);
+
+        newCards.push({
+          id: cardIdWithIdx,
+          title: rec.title || '관련 정책',
+          type: 'rag',
+          content: rec.content || '',
+          metadata: metadata,
+          relevance: rec.relevance_score,
+          collection: rec.collection,
+          recommendationReason: rec.recommendation_reason || '',
+          briefInfo: briefInfo,
+          monthlyPrice: monthlyPrice,
+          collapsed: idx > 0,  // 첫 번째만 펼침
+          isNew: true,  // 새로 도착한 카드 표시
+          ragGroupId: cardId,  // RAG 그룹 ID (같은 턴의 카드 그룹화)
+          ragIndex: idx,  // RAG 그룹 내 인덱스
+        });
+      });
+
+      // 새 카드 ID들을 하이라이트 상태에 추가
+      setNewRagCardIds((prevIds) => {
+        const updated = new Set(prevIds);
+        newCardIds.forEach((id) => updated.add(id));
+        return updated;
+      });
+
+      // 3초 후 하이라이트 제거
+      setTimeout(() => {
+        setNewRagCardIds((prevIds) => {
+          const updated = new Set(prevIds);
+          newCardIds.forEach((id) => updated.delete(id));
+          return updated;
+        });
+      }, 3000);
+
+      // RAG 카드 표시 개수 초기화 (새 그룹이 도착하면 2개만 표시)
+      setRagCardVisibleCount(2);
+
+      return [...newCards, ...prev];
+    });
+  }, [latestTurnId, agentUpdates]);
+
+  /**
+   * FAQ 검색 결과 수신 시 우측 스택에 카드 추가
+   *
+   * 백엔드 응답 구조:
+   * faq_result: {
+   *   query: string,
+   *   faqs: [{question, answer, category, id}],
+   *   cache_hit: boolean,
+   *   similarity_score: float,
+   *   cached_query: string,
+   *   search_time_ms: float
+   * }
+   */
+  useEffect(() => {
+    if (!latestTurnId) return;
+
+    const bucket = agentUpdates[latestTurnId] || {};
+    const faqData = bucket.faq_search || {};
+
+    // faq_result에서 데이터 추출
+    const faqResult = faqData.faq_result || faqData;
+
+    // FAQ가 없으면 무시
+    if (!faqResult.faqs?.length) return;
+
+    const faqs = faqResult.faqs || [];
+    const cardId = `faq-${latestTurnId}`;
+    const cacheHit = faqResult.cache_hit;
+
+    setAssistCards((prev) => {
+      if (prev.some((c) => c.id === cardId || c.id.startsWith(`${cardId}-`))) return prev;
+
+      const newCards = [];
+      const newCardIds = [];
+
+      // FAQ 카드 추가 (최대 3개)
+      faqs.slice(0, 3).forEach((faq, idx) => {
+        const cardIdWithIdx = `${cardId}-faq-${idx}`;
+        newCardIds.push(cardIdWithIdx);
+
+        newCards.push({
+          id: cardIdWithIdx,
+          title: faq.question || 'FAQ',
+          type: 'faq',
+          content: faq.answer || '',
+          category: faq.category || '',
+          faqId: faq.id || '',
+          cacheHit: cacheHit,
+          collapsed: idx > 0,  // 첫 번째만 펼침
+          isNew: true,
+          faqGroupId: cardId,
+          faqIndex: idx,
+        });
+      });
+
+      // 새 카드 ID들을 하이라이트 상태에 추가
+      setNewRagCardIds((prevIds) => {
+        const updated = new Set(prevIds);
+        newCardIds.forEach((id) => updated.add(id));
+        return updated;
+      });
+
+      // 3초 후 하이라이트 제거
+      setTimeout(() => {
+        setNewRagCardIds((prevIds) => {
+          const updated = new Set(prevIds);
+          newCardIds.forEach((id) => updated.delete(id));
+          return updated;
+        });
+      }, 3000);
+
+      return [...newCards, ...prev];
+    });
+  }, [latestTurnId, agentUpdates]);
 
   /**
    * 고객 선택 시 자동으로 방 목록 가져오기
@@ -347,13 +566,12 @@ function AssistantMain() {
    * 방 목록 가져오기 (고객용)
    */
   const fetchRooms = async () => {
-    // 환경변수 우선, 없으면 현재 호스트 사용
     const apiBase = import.meta.env.VITE_API_URL || '';
     const apiUrl = `${apiBase}/api/rooms`;
 
-    console.log('🔄 Fetching rooms from:', apiUrl);
+    console.log('Fetching rooms from:', apiUrl);
     setLoadingRooms(true);
-    setError(''); // 이전 에러 초기화
+    setError('');
     try {
       const headers = {
         'bypass-tunnel-reminder': 'true',
@@ -365,22 +583,22 @@ function AssistantMain() {
       }
 
       const response = await fetch(apiUrl, { headers });
-      console.log('📡 Response status:', response.status);
+      console.log('Response status:', response.status);
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
       const data = await response.json();
-      console.log('📦 Received rooms data:', data);
+      console.log('Received rooms data:', data);
       setAvailableRooms(data.rooms || []);
-      console.log('✅ Rooms loaded successfully:', data.rooms?.length || 0);
+      console.log('Rooms loaded successfully:', data.rooms?.length || 0);
     } catch (err) {
-      console.error('❌ Failed to fetch rooms:', err);
+      console.error('Failed to fetch rooms:', err);
       setError(`방 목록을 불러오는데 실패했습니다: ${err.message}`);
     } finally {
       setLoadingRooms(false);
-      console.log('🏁 Fetch rooms completed');
+      console.log('Fetch rooms completed');
     }
   };
 
@@ -392,16 +610,21 @@ function AssistantMain() {
       setError('이름을 입력해주세요');
       return;
     }
+    if (!phoneInput.trim()) {
+      setError('휴대전화 번호를 입력해주세요');
+      return;
+    }
 
     try {
       setError('');
       setTranscripts([]);
       setParsedSummary(null);
       setLlmStatus('connecting');
-      await webrtcClientRef.current.joinRoom(room.room_name, nicknameInput.trim());
+      setCustomerInfo(null);
+      setConsultationHistory([]);
+      await webrtcClientRef.current.joinRoom(room.room_name, nicknameInput.trim(), phoneInput.trim());
       setRoomName(room.room_name);
       setNickname(nicknameInput.trim());
-      // Fallback: 서버 room_joined 이벤트 지연 시에도 화면 전환
       setCurrentRoom(room.room_name);
       setIsInRoom(true);
       setPeerCount(room.peer_count || 0);
@@ -429,7 +652,6 @@ function AssistantMain() {
       await webrtcClientRef.current.joinRoom(roomInput.trim(), nicknameInput.trim());
       setRoomName(roomInput.trim());
       setNickname(nicknameInput.trim());
-      // Fallback: 서버 room_joined 이벤트 지연 시에도 화면 전환
       setCurrentRoom(roomInput.trim());
       setIsInRoom(true);
       setPeerCount(1);
@@ -445,7 +667,7 @@ function AssistantMain() {
     try {
       setError('');
       await webrtcClientRef.current.startCall();
-      setCallStartTime(Date.now()); // 통화 시작 시간 기록
+      setCallStartTime(Date.now());
       setIsCallActive(true);
     } catch (err) {
       console.error('Start call error:', err);
@@ -455,12 +677,46 @@ function AssistantMain() {
   };
 
   /**
-   * 룸 퇴장
+   * 통화 종료 (세션 저장 후 방 나가기)
+   */
+  const handleEndCall = async () => {
+    if (!isCallActive) return;
+
+    setIsSavingSession(true);
+    setSaveSessionResult(null);
+
+    try {
+      // 세션 저장 요청
+      const result = await webrtcClientRef.current.endSession();
+      setSaveSessionResult(result);
+
+      // 3초간 결과 표시 후 방 나가기
+      setTimeout(() => {
+        handleLeaveRoom();
+        setIsSavingSession(false);
+        setSaveSessionResult(null);
+      }, 2000);
+    } catch (error) {
+      console.error('Session save error:', error);
+      setSaveSessionResult({
+        success: false,
+        message: error.message || 'Failed to save session'
+      });
+      // 에러가 있어도 3초 후 방 나가기
+      setTimeout(() => {
+        handleLeaveRoom();
+        setIsSavingSession(false);
+        setSaveSessionResult(null);
+      }, 3000);
+    }
+  };
+
+  /**
+   * 룸 퇴장 (저장 없이 바로 나가기)
    */
   const handleLeaveRoom = () => {
     webrtcClientRef.current.leaveRoom();
 
-    // AudioContext 정리
     if (audioContextRef.current) {
       audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
@@ -482,10 +738,28 @@ function AssistantMain() {
     setRoomInput('');
     setNicknameInput('');
     setLlmStatus('connecting');
-    setCallStartTime(null); // 통화 시작 시간 초기화
+    setCallStartTime(null);
     setConsultationStatus('idle');
     setConsultationResult(null);
     setConsultationError('');
+    setAssistCards(defaultAssistCards());
+    setAgentUpdates({});
+    setLatestTurnId(null);
+    setIsSavingSession(false);
+    setSaveSessionResult(null);
+  };
+
+  /**
+   * 우측 카드 스택: 접기/삭제
+   */
+  const handleToggleCard = (cardId) => {
+    setAssistCards((prev) =>
+      prev.map((card) => (card.id === cardId ? { ...card, collapsed: !card.collapsed } : card)),
+    );
+  };
+
+  const handleDismissCard = (cardId) => {
+    setAssistCards((prev) => prev.filter((card) => card.id !== cardId));
   };
 
   /**
@@ -504,22 +778,15 @@ function AssistantMain() {
   };
 
   /**
-   * 상담 가이드 생성 요청
+   * 감정 상태 결정
    */
-  const handleConsultationRequest = () => {
-    if (!currentRoom) {
-      setConsultationError('룸 정보가 없습니다.');
-      return;
-    }
-    setConsultationStatus('processing');
-    setConsultationError('');
-    setConsultationResult(null);
-    try {
-      webrtcClientRef.current.sendConsultationTask(currentRoom, {});
-    } catch (e) {
-      setConsultationStatus('error');
-      setConsultationError(e.message || '요청 실패');
-    }
+  const getEmotionState = (sentimentLabel) => {
+    if (!sentimentLabel) return 'stable';
+    const label = sentimentLabel.toLowerCase();
+    if (label.includes('angry') || label.includes('분노')) return 'angry';
+    if (label.includes('anxious') || label.includes('불안')) return 'anxious';
+    if (label.includes('confused') || label.includes('혼란')) return 'confused';
+    return 'stable';
   };
 
   // Step 1: 역할 선택
@@ -534,13 +801,13 @@ function AssistantMain() {
               onClick={() => setUserRole('agent')}
               className="btn btn-primary btn-large"
             >
-              👨‍💼 상담사
+              상담사
             </button>
             <button
               onClick={() => setUserRole('customer')}
               className="btn btn-success btn-large"
             >
-              👤 고객
+              고객
             </button>
           </div>
         </div>
@@ -558,7 +825,7 @@ function AssistantMain() {
           <button onClick={handleConnect} className="btn btn-primary">
             서버 연결
           </button>
-          {error && <div className="error-message">⚠️ {error}</div>}
+          {error && <div className="error-message">{error}</div>}
           <button
             onClick={() => setUserRole(null)}
             className="btn btn-secondary mt-2"
@@ -572,7 +839,6 @@ function AssistantMain() {
 
   // Step 3: 방 선택/생성
   if (!isInRoom) {
-    // 상담사: 방 생성
     if (userRole === 'agent') {
       return (
         <div className="assistant-welcome">
@@ -602,13 +868,12 @@ function AssistantMain() {
                 상담실 생성
               </button>
             </form>
-            {error && <div className="error-message">⚠️ {error}</div>}
+            {error && <div className="error-message">{error}</div>}
           </div>
         </div>
       );
     }
 
-    // 고객: 방 목록에서 선택
     return (
       <div className="assistant-welcome">
         <div className="welcome-card wide">
@@ -621,6 +886,16 @@ function AssistantMain() {
               placeholder="이름을 입력하세요"
               value={nicknameInput}
               onChange={(e) => setNicknameInput(e.target.value)}
+            />
+          </div>
+
+          <div className="form-group">
+            <label>휴대전화 번호</label>
+            <input
+              type="tel"
+              placeholder="010-1234-5678"
+              value={phoneInput}
+              onChange={(e) => setPhoneInput(e.target.value)}
             />
           </div>
 
@@ -656,7 +931,7 @@ function AssistantMain() {
             </div>
           )}
 
-          {error && <div className="error-message">⚠️ {error}</div>}
+          {error && <div className="error-message">{error}</div>}
         </div>
       </div>
     );
@@ -664,240 +939,623 @@ function AssistantMain() {
 
   // Main Dashboard
   const remotePeer = getRemotePeer();
+  const latestUpdateBucket = latestTurnId ? agentUpdates[latestTurnId] || {} : {};
+
+  // 노드별 데이터 추출 (백엔드에서 {node_result: {...}, last_xxx_index: N} 형식으로 전송)
+  const summaryRaw = latestUpdateBucket.summarize || {};
+  const intentRaw = latestUpdateBucket.intent || {};
+  const sentimentRaw = latestUpdateBucket.sentiment || {};
+  const draftRaw = latestUpdateBucket.draft_reply || latestUpdateBucket.draft_replies || {};
+  const riskRaw = latestUpdateBucket.risk || {};
+  const ragPolicyData = latestUpdateBucket.rag_policy || {};
+
+  // 중첩 구조 평탄화 (xxx_result 또는 직접 필드 접근)
+  const summaryData = summaryRaw.summary_result || summaryRaw;
+  const intentData = intentRaw.intent_result || intentRaw;
+  const sentimentData = sentimentRaw.sentiment_result || sentimentRaw;
+  const draftData = draftRaw.draft_replies || draftRaw;
+  const riskData = riskRaw.risk_result || riskRaw;
+
+  const emotionState = getEmotionState(sentimentData.sentiment_label);
+  const riskFlags = riskData.risk_flags || [];
+  const currentIssueSummary = summaryData.customer_issue || intentData.intent_label || '대기 중';
 
   return (
     <div className="assistant-dashboard">
-      {/* Header */}
+      {/* 세션 저장 로딩 오버레이 */}
+      {isSavingSession && (
+        <div className="session-saving-overlay">
+          <div className="session-saving-content">
+            {!saveSessionResult ? (
+              <>
+                <div className="saving-spinner"></div>
+                <p className="saving-text">상담 내역을 저장하고 있습니다...</p>
+              </>
+            ) : (
+              <>
+                <div className={`saving-result-icon ${saveSessionResult.success ? 'success' : 'error'}`}>
+                  {saveSessionResult.success ? (
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polyline points="20 6 9 17 4 12"></polyline>
+                    </svg>
+                  ) : (
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="6" x2="6" y2="18"></line>
+                      <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                  )}
+                </div>
+                <p className="saving-text">
+                  {saveSessionResult.success ? '저장이 완료되었습니다!' : '저장에 실패했습니다'}
+                </p>
+                {saveSessionResult.session_id && (
+                  <p className="saving-session-id">Session ID: {saveSessionResult.session_id.slice(0, 8)}...</p>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Top Header Bar */}
       <header className="dashboard-header">
         <div className="header-content">
-          <h1>AI 상담 어시스턴트 (v1.0)</h1>
-          <div className="header-info">
-            <div className="header-user-info">
-              <span className="user-role">{userRole === 'agent' ? '상담사' : '고객'}</span>
-              <span className="user-name">{nickname}</span>
-              <span className="user-room">룸: {currentRoom}</span>
-              <span className="user-peer">ID: {peerId.substring(0, 8)}...</span>
+          {/* 좌측: 통화 컨트롤 + 통화 상태 + 타이머 + 고객 정보 */}
+          <div className="header-left">
+            {/* 통화 컨트롤 버튼 */}
+            <div className="header-call-controls">
+              {!isCallActive ? (
+                <button onClick={handleStartCall} className="btn btn-success btn-call">
+                  통화 시작
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={handleToggleAudio}
+                    className={`btn btn-call ${isAudioEnabled ? 'btn-primary' : 'btn-ghost'}`}
+                  >
+                    {isAudioEnabled ? 'MIC ON' : 'MIC OFF'}
+                  </button>
+                  <button
+                    onClick={handleEndCall}
+                    className="btn btn-call btn-danger"
+                    disabled={isSavingSession}
+                  >
+                    통화 종료
+                  </button>
+                  <button
+                    onClick={handleLeaveRoom}
+                    className="btn btn-call btn-outline-secondary"
+                    disabled={isSavingSession}
+                  >
+                    저장 없이 나가기
+                  </button>
+                </>
+              )}
+              {/* 방 나가기 버튼 - 통화 중이 아닐 때만 표시 */}
+              {!isCallActive && (
+                <button onClick={handleLeaveRoom} className="btn btn-call btn-secondary">
+                  방 나가기
+                </button>
+              )}
             </div>
-            <div className="call-status">
-              {isCallActive && (
+
+            <div className={`call-status-badge ${isCallActive ? 'active' : 'waiting'}`}>
+              {isCallActive ? (
                 <>
                   <span className="status-indicator">
                     <span className="ping"></span>
                     <span className="dot"></span>
                   </span>
-                  <span>통화 중 ({formatDuration(callDuration)})</span>
+                  <span>통화 중</span>
                 </>
+              ) : (
+                <span>대기 중</span>
               )}
-              {!isCallActive && <span className="status-waiting">대기 중</span>}
             </div>
+            {isCallActive && (
+              <span className="call-timer">{formatDuration(callDuration)}</span>
+            )}
+            {userRole === 'agent' && remotePeer && (
+              <div className="customer-brief">
+                <span className="customer-name">{remotePeer.nickname}</span>
+                {customerInfo?.membership_grade && (
+                  <span className="customer-grade">{customerInfo.membership_grade}</span>
+                )}
+                {customerInfo?.age && (
+                  <span>{customerInfo.age}세</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 중앙: 핵심 이슈 요약 */}
+          <div className="header-center">
+            <span className="issue-summary">{currentIssueSummary}</span>
+          </div>
+
+          {/* 우측: 연결상태 + 테마토글 */}
+          <div className="header-right">
+            {/* 연결 상태 */}
+            <div className={`connection-status ${connectionState || 'disconnected'}`}>
+              <span className="connection-dot"></span>
+              <span>{connectionState || '미연결'}</span>
+            </div>
+
+            <button className="theme-toggle" onClick={toggleDarkMode} title={isDarkMode ? '라이트 모드' : '다크 모드'}>
+              {isDarkMode ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="5"></circle>
+                  <line x1="12" y1="1" x2="12" y2="3"></line>
+                  <line x1="12" y1="21" x2="12" y2="23"></line>
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                  <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                  <line x1="1" y1="12" x2="3" y2="12"></line>
+                  <line x1="21" y1="12" x2="23" y2="12"></line>
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                  <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                </svg>
+              )}
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="dashboard-main">
-        {/* Left Sidebar: Connection Info */}
-        <aside className="sidebar-left">
-          {/* Connection Info Card */}
-          <div className="card">
-            <h2 className="card-title">연결 정보</h2>
-            <div className="info-grid">
-              {remotePeer ? (
-                <>
-                  <div className="info-row">
-                    <span className="info-label">{userRole === 'agent' ? '고객명' : '상담사'}</span>
-                    <span className="info-value">{remotePeer.nickname}</span>
-                  </div>
-                  <div className="info-row">
-                    <span className="info-label">Peer ID</span>
-                    <span className="info-value small">{remotePeer.peer_id.substring(0, 8)}...</span>
-                  </div>
-                  <div className="info-row">
-                    <span className="info-label">연결 상태</span>
-                    <span className={`info-value status-${connectionState}`}>
-                      {connectionState || '미연결'}
-                    </span>
-                  </div>
-                  <div className="info-row">
-                    <span className="info-label">참가자 수</span>
-                    <span className="info-value">{peerCount}명</span>
-                  </div>
-                </>
-              ) : (
-                <div className="no-connection">
-                  <p>연결된 사용자가 없습니다.</p>
-                  <p className="wait-message">상대방이 입장할 때까지 기다려주세요...</p>
+      {/* 좌측 패널 토글 버튼 */}
+      <button
+        className={`panel-toggle-btn ${!leftPanelVisible ? 'panel-hidden' : ''}`}
+        onClick={() => setLeftPanelVisible(!leftPanelVisible)}
+        title={leftPanelVisible ? '좌측 패널 숨기기' : '좌측 패널 표시'}
+      >
+        {leftPanelVisible ? '<' : '>'}
+      </button>
+
+      {/* Main Content - 3분할 */}
+      <main className={`dashboard-main ${userRole === 'customer' ? 'customer-view' : ''} ${!leftPanelVisible ? 'left-panel-hidden' : ''}`}>
+        {/* 좌측 패널: 실시간 대화 */}
+        <div className="panel panel-left">
+          {/* 고객 정보 카드 - 상담사 전용 */}
+          {userRole === 'agent' && (
+            <div className={`card collapsible-card ${customerInfoCollapsed ? 'collapsed' : ''}`}>
+              <div
+                className="card-header clickable"
+                onClick={() => setCustomerInfoCollapsed(!customerInfoCollapsed)}
+              >
+                <h3 className="card-title">고객 정보</h3>
+                <button className="collapse-btn">
+                  {customerInfoCollapsed ? '+' : '-'}
+                </button>
+              </div>
+              {!customerInfoCollapsed && (
+                <div className="card-body">
+                  {customerInfo ? (
+                    <div className="customer-info-grid">
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">고객명</span>
+                        <span className="customer-info-value">{remotePeer?.nickname || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">등급</span>
+                        <span className="customer-info-value highlight">{customerInfo.membership_grade || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">나이/성별</span>
+                        <span className="customer-info-value">
+                          {customerInfo.age ? `${customerInfo.age}세` : '-'} / {customerInfo.gender || '-'}
+                        </span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">거주지</span>
+                        <span className="customer-info-value">{customerInfo.residence || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">요금제</span>
+                        <span className="customer-info-value highlight">{customerInfo.current_plan || customerInfo.plan_name || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">월 요금</span>
+                        <span className="customer-info-value">
+                          {customerInfo.monthly_fee ? `${customerInfo.monthly_fee.toLocaleString()}원` : '-'}
+                        </span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">약정상태</span>
+                        <span className="customer-info-value">{customerInfo.contract_status || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">결합정보</span>
+                        <span className="customer-info-value">{customerInfo.bundle_info || '없음'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">데이터</span>
+                        <span className="customer-info-value">{customerInfo.data_allowance || '-'}</span>
+                      </div>
+                      <div className="customer-info-row">
+                        <span className="customer-info-label">가입일</span>
+                        <span className="customer-info-value">{customerInfo.subscription_date || '-'}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="no-connection">
+                      <p>고객 연결 대기 중...</p>
+                      <p className="wait-message">고객이 입장하면 정보가 표시됩니다.</p>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
+          )}
 
-            {/* Call Controls */}
-            <div className="call-controls">
-              {!isCallActive ? (
-                <button onClick={handleStartCall} className="btn btn-success btn-block">
-                  🎤 통화 시작
-                </button>
-              ) : (
-                <>
-                  <div className="control-buttons">
-                    <button
-                      onClick={handleToggleAudio}
-                      className={`btn btn-sm ${isAudioEnabled ? 'btn-primary' : 'btn-secondary'}`}
-                      title={isAudioEnabled ? '음소거' : '음소거 해제'}
-                    >
-                      {isAudioEnabled ? '🎤' : '🔇'}
-                    </button>
-                  </div>
-                  <button onClick={handleLeaveRoom} className="btn btn-danger btn-block mt-2">
-                    통화 종료
-                  </button>
-                </>
-              )}
+          {/* 실시간 대화 카드 */}
+          <div className={`card collapsible-card card-flex ${conversationCollapsed ? 'collapsed' : ''}`}>
+            <div
+              className="card-header clickable"
+              onClick={() => setConversationCollapsed(!conversationCollapsed)}
+            >
+              <h3 className="card-title">실시간 대화</h3>
+              <button className="collapse-btn">
+                {conversationCollapsed ? '+' : '-'}
+              </button>
             </div>
+            {!conversationCollapsed && (
+              <div className="conversation-list" ref={transcriptContainerRef}>
+                {transcripts.length === 0 ? (
+                  <p className="no-conversation">대화 내용이 여기에 표시됩니다...</p>
+                ) : (
+                  transcripts.map((transcript, index) => {
+                    const isOwnMessage = transcript.peer_id === peerId;
+                    const isCustomerMessage = userRole === 'agent' ? !isOwnMessage : isOwnMessage;
+                    const role = isCustomerMessage ? '고객' : '상담사';
+                    const elapsedTime = getElapsedSeconds(transcript.receivedAt);
+
+                    return (
+                      <div
+                        key={index}
+                        className={`message-bubble ${isCustomerMessage ? 'customer' : 'agent'}`}
+                      >
+                        <div className="message-header">
+                          <span className="message-sender">{role}</span>
+                          <span className="message-time">{formatDuration(elapsedTime)}</span>
+                        </div>
+                        <div className="message-text">{transcript.text}</div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Past Consultation History - 상담사만 표시 */}
+          {/* 과거 상담 이력 - 상담사만 */}
           {userRole === 'agent' && (
-            <div className="card card-flex">
-              <h2 className="card-title">과거 상담 이력 (총 3건)</h2>
-              <div className="history-list">
-                <div className="history-item">
-                  <p className="history-title">2025-11-03: 배송 지연 문의</p>
-                  <p className="history-content">"상품이 아직 도착하지 않았습니다."</p>
-                  <p className="history-agent">담당: 박상담</p>
+            <div className={`card collapsible-card ${historyCollapsed ? 'collapsed' : ''}`}>
+              <div
+                className="card-header clickable"
+                onClick={() => setHistoryCollapsed(!historyCollapsed)}
+              >
+                <h3 className="card-title">
+                  과거 상담 이력 {consultationHistory.length > 0 && `(${consultationHistory.length}건)`}
+                </h3>
+                <button className="collapse-btn">
+                  {historyCollapsed ? '+' : '-'}
+                </button>
+              </div>
+              {!historyCollapsed && (
+                <div className="card-body">
+                  <div className="history-list">
+                    {consultationHistory.length > 0 ? (
+                      consultationHistory.map((history, index) => {
+                        const detail = history.detail || {};
+                        const summary = typeof detail === 'object' ? detail.summary : detail;
+                        return (
+                          <div key={index} className="history-item">
+                            <p className="history-title">
+                              {history.consultation_date}: {history.consultation_type || '상담'}
+                            </p>
+                            <p className="history-content">
+                              {summary ? `"${summary}"` : '내용 없음'}
+                            </p>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p className="no-history">상담 이력이 없습니다.</p>
+                    )}
+                  </div>
                 </div>
-                <hr />
-                <div className="history-item">
-                  <p className="history-title">2025-10-20: 결제 오류</p>
-                  <p className="history-content">"카드로하려 하는데 결제가 안돼요."</p>
-                  <p className="history-agent">담당: 김상담</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* 중앙 패널: 핵심 인사이트 */}
+        <div className="panel panel-center">
+          {/* 응답 초안 카드 */}
+          {userRole === 'agent' && (
+            <div className="card">
+              <div className="card-header">
+                <h3 className="card-title">응답 초안 추천</h3>
+              </div>
+              <div className="card-body">
+                {draftData.keywords && draftData.keywords.length > 0 && (
+                  <div className="response-keywords">
+                    {draftData.keywords.map((keyword, idx) => (
+                      <span key={idx} className="keyword-tag">{keyword}</span>
+                    ))}
+                  </div>
+                )}
+                <div className="response-content">
+                  {draftData.short_reply || '응답 초안 대기 중...'}
                 </div>
-                <hr />
-                <div className="history-item">
-                  <p className="history-title">2025-09-15: 회원가입 문의</p>
-                  <p className="history-content">"아이디가 기억나지 않습니다."</p>
-                  <p className="history-agent">담당: 김상담</p>
-                </div>
+                <p className="copy-hint">클릭하여 복사</p>
               </div>
             </div>
           )}
-        </aside>
 
-        {/* Center: Conversation */}
-        <section className="conversation-section">
-          {/* Summary Card */}
-          <div className="card summary-card">
-            <h2 className="card-title summary-card-title">🤖 AI 실시간 통화 요약</h2>
-            {summaryTimestamp && (
-              <div className="summary-timestamp">
-                {formatDuration(getElapsedSeconds(summaryTimestamp))}
+          {/* 자동 요약 카드 */}
+          <div className={`insight-card collapsible-card ${summaryCardCollapsed ? 'collapsed' : ''}`}>
+            <div
+              className="insight-card-header clickable"
+              onClick={() => setSummaryCardCollapsed(!summaryCardCollapsed)}
+            >
+              <div className="insight-icon summary">S</div>
+              <span className="insight-card-title">자동 문제 요약</span>
+              <button className="collapse-btn">{summaryCardCollapsed ? '+' : '-'}</button>
+            </div>
+            {!summaryCardCollapsed && (
+              <div className="insight-card-body">
+                <div className="summary-content">
+                  <div className="summary-item">
+                    <div className="summary-label">요약</div>
+                    <div className="summary-value">{summaryData.summary || '대기 중'}</div>
+                  </div>
+                  <div className="summary-item">
+                    <div className="summary-label">고객 문의</div>
+                    <div className="summary-value">{summaryData.customer_issue || '대기 중'}</div>
+                  </div>
+                  <div className="summary-item">
+                    <div className="summary-label">상담사 대응</div>
+                    <div className="summary-value">{summaryData.agent_action || '대기 중'}</div>
+                  </div>
+                </div>
               </div>
             )}
-            <div className="summary-content">
-              {llmStatus === 'connecting' && <p className="summary-text">LLM 연결 중...</p>}
-              {llmStatus === 'ready' && <p className="summary-text">✅ 요약 대기 중 (대화 시작 시 실시간 요약 생성)</p>}
-              {llmStatus === 'connected' && parsedSummary && (
-                <div className="summary-json">
-                  <div className="summary-field">
-                    <span className="summary-label">📝 요약:</span>
-                    <span className="summary-value">{parsedSummary.summary || '없음'}</span>
-                  </div>
-                  <div className="summary-field">
-                    <span className="summary-label">❓ 고객 문의:</span>
-                    <span className="summary-value">{parsedSummary.customer_issue || '없음'}</span>
-                  </div>
-                  <div className="summary-field">
-                    <span className="summary-label">💡 상담사 대응:</span>
-                    <span className="summary-value">{parsedSummary.agent_action || '없음'}</span>
-                  </div>
-                </div>
-              )}
-              {llmStatus === 'connected' && !parsedSummary && <p className="summary-text">요약 수신 대기 중...</p>}
-              {llmStatus === 'failed' && <p className="summary-text error">❌ LLM 연결 실패: 요약 기능을 사용할 수 없습니다. (STT는 정상 동작)</p>}
-            </div>
           </div>
 
-          {/* Real-time Conversation */}
-          <div className="card card-flex">
-            <h2 className="card-title">실시간 대화</h2>
-            <div className="conversation-list" ref={transcriptContainerRef}>
-              {transcripts.length === 0 ? (
-                <p className="no-conversation">대화 내용이 여기에 표시됩니다...</p>
-              ) : (
-                transcripts.map((transcript, index) => {
-                  const isOwnMessage = transcript.peer_id === peerId;
-                  const role = isOwnMessage
-                    ? (userRole === 'agent' ? '상담사' : '고객')
-                    : (userRole === 'agent' ? '고객' : '상담사');
-                  const elapsedTime = getElapsedSeconds(transcript.receivedAt);
-
-                  return (
-                    <div key={index} className="conversation-item">
-                      <div className="conversation-header">
-                        <span className={`speaker ${isOwnMessage ? 'agent' : 'customer'}`}>
-                          [{role}]
-                        </span>
-                        <span className="conversation-time">
-                          {formatDuration(elapsedTime)}
-                        </span>
-                      </div>
-                      <div className="conversation-text">
-                        {transcript.text}
+          {/* 감정 분석 카드 */}
+          <div className={`insight-card collapsible-card ${emotionCardCollapsed ? 'collapsed' : ''}`}>
+            <div
+              className="insight-card-header clickable"
+              onClick={() => setEmotionCardCollapsed(!emotionCardCollapsed)}
+            >
+              <div className="insight-icon emotion">E</div>
+              <span className="insight-card-title">감정 분석</span>
+              <span className={`insight-emotion-label ${emotionState}`}>
+                {sentimentData.sentiment_label || '안정'}
+              </span>
+              <button className="collapse-btn">{emotionCardCollapsed ? '+' : '-'}</button>
+            </div>
+            {!emotionCardCollapsed && (
+              <div className="insight-card-body">
+                <div className="emotion-content">
+                  <div className="emotion-indicators">
+                    <div className="emotion-indicator">
+                      <div className="emotion-indicator-label">강도</div>
+                      <div className="emotion-indicator-value">
+                        {sentimentData.sentiment_score ?? '-'}
                       </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
+                    <div className="emotion-indicator">
+                      <div className="emotion-indicator-label">해지 리스크</div>
+                      <div className={`emotion-indicator-value ${riskFlags.includes('해지') ? 'high' : 'low'}`}>
+                        {riskFlags.includes('해지') ? '높음' : '낮음'}
+                      </div>
+                    </div>
+                  </div>
+                  {sentimentData.sentiment_explanation && (
+                    <div className="emotion-advice">
+                      {sentimentData.sentiment_explanation}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
-        </section>
 
-        {/* Right Sidebar: AI Assistance - 상담사만 표시 */}
+          {/* 리스크 분석 카드 */}
+          {riskFlags.length > 0 && (
+            <div className="insight-card">
+              <div className="insight-card-header">
+                <div className="insight-icon" style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#EF4444' }}>R</div>
+                <span className="insight-card-title">리스크 감지</span>
+              </div>
+              <div className="insight-card-body">
+                <div className="risk-alert">
+                  <div className="risk-alert-title">감지된 위험 요소</div>
+                  <div className="risk-alert-desc">{riskFlags.join(', ')}</div>
+                </div>
+                {riskData.risk_explanation && (
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                    {riskData.risk_explanation}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 우측 패널: 고객 의도 + RAG - 상담사만 */}
         {userRole === 'agent' && (
-          <aside className="sidebar-right">
-            {/* 상담 가이드 생성 */}
-            <div className="card ai-recommendation">
-              <h2 className="card-title">상담 가이드 생성</h2>
-              <p className="info-text">실시간 요약은 자동, 버튼을 눌러 가이드를 요청하세요.</p>
-              <button
-                className="btn btn-primary btn-block"
-                onClick={handleConsultationRequest}
-                disabled={consultationStatus === 'processing' || !isInRoom}
+          <div className="panel panel-right">
+            {/* 고객 의도 카드 */}
+            <div className={`insight-card collapsible-card ${intentCardCollapsed ? 'collapsed' : ''}`}>
+              <div
+                className="insight-card-header clickable"
+                onClick={() => setIntentCardCollapsed(!intentCardCollapsed)}
               >
-                {consultationStatus === 'processing' ? '생성 중...' : '상담 가이드 생성'}
-              </button>
-              {consultationStatus === 'processing' && (
-                <p className="status-text">가이드를 생성하는 중입니다...</p>
-              )}
-              {consultationStatus === 'error' && consultationError && (
-                <p className="error-message">⚠️ {consultationError}</p>
-              )}
-              {consultationResult && (
-                <div className="consultation-result">
-                  <h3>가이드</h3>
-                  {consultationResult.guide.length === 0 ? (
-                    <p className="info-text">가이드가 비어 있습니다.</p>
-                  ) : (
-                    <ul>
-                      {consultationResult.guide.map((item, idx) => (
-                        <li key={idx}>{item}</li>
-                      ))}
-                    </ul>
-                  )}
-                  {consultationResult.recommendations?.length > 0 && (
-                    <>
-                      <h4>추천</h4>
-                      <ul>
-                        {consultationResult.recommendations.map((rec, idx) => (
-                          <li key={idx}>{rec}</li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
+                <div className="insight-icon intent">I</div>
+                <span className="insight-card-title">고객 의도</span>
+                <span className="insight-intent-label">
+                  {intentData.intent_label || '분석 대기 중'}
+                </span>
+                <button className="collapse-btn">{intentCardCollapsed ? '+' : '-'}</button>
+              </div>
+              {!intentCardCollapsed && (
+                <div className="insight-card-body">
+                  <div className="intent-detail">
+                    <p><strong>근거:</strong> {intentData.intent_explanation || '분석 대기 중'}</p>
+                  </div>
                 </div>
               )}
             </div>
-          </aside>
+
+            {/* RAG 정책/정보 카드 스택 */}
+            <div className="card card-flex">
+              <div className="card-header">
+                <h3 className="card-title">RAG 정책 / 알림</h3>
+              </div>
+              <div className="card-body">
+                {(() => {
+                  // RAG 카드와 기타 카드 분리
+                  const ragCards = assistCards.filter((c) => c.type === 'rag');
+                  const otherCards = assistCards.filter((c) => c.type !== 'rag');
+
+                  // 최신 RAG 그룹 찾기 (가장 최근 턴의 카드들)
+                  const latestRagGroupId = ragCards.length > 0 ? ragCards[0].ragGroupId : null;
+                  const latestRagCards = ragCards.filter((c) => c.ragGroupId === latestRagGroupId);
+                  const olderRagCards = ragCards.filter((c) => c.ragGroupId !== latestRagGroupId);
+
+                  // 최신 RAG 그룹에서 표시할 카드 (ragCardVisibleCount 개)
+                  const visibleLatestRagCards = latestRagCards.slice(0, ragCardVisibleCount);
+                  const hiddenLatestRagCount = latestRagCards.length - ragCardVisibleCount;
+
+                  // 전체 표시할 카드: 최신 RAG (제한) + 이전 RAG + 기타
+                  const allVisibleCards = [...visibleLatestRagCards, ...olderRagCards, ...otherCards];
+
+                  if (allVisibleCards.length === 0) {
+                    return <p style={{ color: 'var(--text-muted)', fontSize: '13px' }}>표시할 카드가 없습니다.</p>;
+                  }
+
+                  return (
+                    <div className="stack-list">
+                      {allVisibleCards.map((card, cardIndex) => {
+                        const isHighlighted = newRagCardIds.has(card.id);
+                        const isLatestGroup = card.ragGroupId === latestRagGroupId;
+                        const showLoadMore = isLatestGroup && card.ragIndex === ragCardVisibleCount - 1 && hiddenLatestRagCount > 0;
+
+                        return (
+                          <React.Fragment key={card.id}>
+                            <div
+                              className={`stack-card ${card.collapsed ? 'collapsed' : ''} ${card.type === 'rag' ? 'rag-card' : ''} ${card.type === 'faq' ? 'faq-card' : ''} ${isHighlighted ? 'rag-card-highlight' : ''}`}
+                            >
+                              <div className="stack-card-header" onClick={() => handleToggleCard(card.id)}>
+                                <div className="stack-card-meta">
+                                  <span className={`pill pill-${card.type || 'default'}`}>
+                                    {card.type === 'reply' && '응답'}
+                                    {card.type === 'policy' && '정책'}
+                                    {card.type === 'risk' && '위험'}
+                                    {card.type === 'guide' && '가이드'}
+                                    {card.type === 'rag' && 'RAG'}
+                                    {card.type === 'faq' && 'FAQ'}
+                                    {!card.type && '알림'}
+                                  </span>
+                                  <span className="stack-card-title">{card.title}</span>
+                                  {card.relevance && (
+                                    <span className="relevance-badge" title="관련도">
+                                      {Math.round(card.relevance * 100)}%
+                                    </span>
+                                  )}
+                                  {isHighlighted && <span className="new-badge">NEW</span>}
+                                </div>
+                                <div className="stack-card-actions">
+                                  <button
+                                    className="icon-btn"
+                                    title={card.collapsed ? '펼치기' : '접기'}
+                                  >
+                                    {card.collapsed ? '+' : '-'}
+                                  </button>
+                                  <button
+                                    className="icon-btn"
+                                    onClick={(e) => { e.stopPropagation(); handleDismissCard(card.id); }}
+                                    title="닫기"
+                                  >
+                                    x
+                                  </button>
+                                </div>
+                              </div>
+                              {!card.collapsed && (
+                                <div className="stack-card-body">
+                                  {card.collection && (
+                                    <div className="card-collection-tag">
+                                      {card.collection.replace('kt_', '').replace(/_/g, ' ')}
+                                    </div>
+                                  )}
+                                  {/* FAQ 카드: 카테고리 및 캐시 정보 */}
+                                  {card.type === 'faq' && card.category && (
+                                    <div className="card-faq-category">
+                                      <span className="faq-category-label">{card.category}</span>
+                                      {card.cacheHit && <span className="faq-cache-badge">Cached</span>}
+                                    </div>
+                                  )}
+                                  {/* RAG 카드: 월정액 및 요약 정보 */}
+                                  {card.type === 'rag' && card.monthlyPrice && (
+                                    <div className="card-price-info">
+                                      <span className="price-label">월정액:</span>
+                                      <span className="price-value">{card.monthlyPrice.toLocaleString()}원</span>
+                                    </div>
+                                  )}
+                                  {card.type === 'rag' && card.briefInfo && (
+                                    <div className="card-brief-info">{card.briefInfo}</div>
+                                  )}
+                                  {card.content && <p className="stack-card-text">{card.content}</p>}
+                                  {/* RAG 카드: 추천 이유 */}
+                                  {card.type === 'rag' && card.recommendationReason && (
+                                    <div className="card-recommendation-reason">
+                                      <span className="reason-label">추천:</span> {card.recommendationReason}
+                                    </div>
+                                  )}
+                                  {/* 기존 policy 카드 호환 (metadata.monthly_price) */}
+                                  {card.type !== 'rag' && card.metadata && card.metadata.monthly_price && (
+                                    <div className="card-price-info">
+                                      <span className="price-label">월정액:</span>
+                                      <span className="price-value">{card.metadata.monthly_price}</span>
+                                    </div>
+                                  )}
+                                  {card.checklist && (
+                                    <ul className="checklist">
+                                      {card.checklist.map((item, idx) => (
+                                        <li key={idx} className="checklist-item">
+                                          <span className="checklist-bullet"></span>
+                                          {item}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                            {/* 더 보기 버튼 */}
+                            {showLoadMore && (
+                              <button
+                                className="load-more-btn"
+                                onClick={() => setRagCardVisibleCount((prev) => Math.min(prev + 3, 5))}
+                              >
+                                + {hiddenLatestRagCount}개 더 보기
+                              </button>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          </div>
         )}
       </main>
 
