@@ -65,7 +65,12 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 import httpx
 
-from modules import PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager, DatabaseLogHandler, CustomerRepository
+from modules import (
+    PeerConnectionManager, RoomManager, get_db_manager, get_redis_manager,
+    DatabaseLogHandler, CustomerRepository,
+    get_session_repository, get_transcript_repository, get_agent_result_repository,
+    get_agent_repository
+)
 from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 from pathlib import Path
@@ -99,8 +104,67 @@ def verify_ws_token(token: Optional[str]) -> bool:
 
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+os.makedirs("logs", exist_ok=True)
+log_filename = f"logs/server_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.log"
+
+# 환경별 로그 레벨 설정 (환경변수로 제어)
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+ENV = os.getenv("ENV", "development")
+
+# 로그 보관 기간 (일) - 기본 60일 (2개월)
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "60"))
+
+
+def cleanup_old_logs(log_dir: str = "logs", retention_days: int = LOG_RETENTION_DAYS) -> int:
+    """오래된 로그 파일을 삭제합니다.
+
+    Args:
+        log_dir: 로그 디렉토리 경로
+        retention_days: 보관 기간 (일)
+
+    Returns:
+        삭제된 파일 수
+    """
+    import glob
+    from datetime import datetime, timedelta
+
+    if not os.path.exists(log_dir):
+        return 0
+
+    cutoff_date = datetime.now() - timedelta(days=retention_days)
+    deleted_count = 0
+
+    # 삭제할 로그 패턴들 (server_*.log, frontend/frontend_*.log)
+    log_patterns = [
+        (os.path.join(log_dir, "server_*.log"), "server_", ".log"),
+        (os.path.join(log_dir, "frontend", "frontend_*.log"), "frontend_", ".log"),
+    ]
+
+    for log_pattern, prefix, suffix in log_patterns:
+        for log_file in glob.glob(log_pattern):
+            try:
+                filename = os.path.basename(log_file)
+                date_str = filename.replace(prefix, "").replace(suffix, "")
+                file_date = datetime.strptime(date_str, "%Y%m%d")
+
+                if file_date < cutoff_date:
+                    os.remove(log_file)
+                    deleted_count += 1
+            except (ValueError, OSError):
+                continue
+
+    return deleted_count
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),  # 콘솔 출력
+        logging.FileHandler(log_filename, encoding="utf-8"),  # 파일 저장
+    ]
+)
 logger = logging.getLogger(__name__)
+logger.info(f"Logging initialized: level={LOG_LEVEL}, env={ENV}")
 
 # Global managers
 peer_manager = PeerConnectionManager()
@@ -134,6 +198,11 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting up WebRTC Signaling Server...")
+
+    # 오래된 로그 파일 정리 (2개월 이상)
+    deleted_logs = cleanup_old_logs()
+    if deleted_logs > 0:
+        logger.info(f"Cleaned up {deleted_logs} old log files (>{LOG_RETENTION_DAYS} days)")
 
     # Initialize database connection
     db_initialized = await db_manager.initialize()
@@ -567,6 +636,308 @@ async def rag_assist_proxy(
         )
 
 
+# ============================================================================
+# 상담 이력 조회 API
+# ============================================================================
+
+
+@app.get("/api/consultation/sessions/{customer_id}")
+async def get_customer_sessions(
+    customer_id: int,
+    limit: int = Query(default=10, ge=1, le=50),
+    _: bool = Depends(verify_auth_header)
+):
+    """고객의 상담 세션 목록을 조회합니다.
+
+    Args:
+        customer_id: 고객 ID
+        limit: 조회 개수 제한 (기본값: 10, 최대: 50)
+
+    Returns:
+        dict: 세션 목록
+    """
+    session_repo = get_session_repository()
+    sessions = await session_repo.get_customer_sessions(customer_id, limit)
+
+    # datetime 객체를 문자열로 변환
+    for session in sessions:
+        for key in ['started_at', 'ended_at', 'created_at']:
+            if session.get(key):
+                session[key] = str(session[key])
+
+    return {"sessions": sessions, "count": len(sessions)}
+
+
+@app.get("/api/consultation/session/{session_id}/transcripts")
+async def get_session_transcripts(
+    session_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _: bool = Depends(verify_auth_header)
+):
+    """세션의 전사 목록을 조회합니다.
+
+    Args:
+        session_id: 세션 UUID
+        limit: 조회 개수 제한 (기본값: 100)
+        offset: 시작 위치 (기본값: 0)
+
+    Returns:
+        dict: 전사 목록
+    """
+    from uuid import UUID
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+    transcript_repo = get_transcript_repository()
+    transcripts = await transcript_repo.get_session_transcripts(session_uuid, limit, offset)
+
+    # timestamp를 문자열로 변환
+    for transcript in transcripts:
+        if transcript.get('timestamp'):
+            transcript['timestamp'] = str(transcript['timestamp'])
+
+    return {"transcripts": transcripts, "count": len(transcripts)}
+
+
+@app.get("/api/consultation/session/{session_id}/results")
+async def get_session_agent_results(
+    session_id: str,
+    result_type: str = Query(default=None, description="결과 타입 필터 (intent, sentiment, summary, rag, faq)"),
+    _: bool = Depends(verify_auth_header)
+):
+    """세션의 에이전트 결과를 조회합니다.
+
+    Args:
+        session_id: 세션 UUID
+        result_type: 결과 타입 필터 (선택)
+
+    Returns:
+        dict: 에이전트 결과 목록
+    """
+    from uuid import UUID
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+    result_repo = get_agent_result_repository()
+    results = await result_repo.get_session_results(session_uuid, result_type)
+
+    # datetime, UUID 객체를 문자열로 변환
+    for result in results:
+        if result.get('created_at'):
+            result['created_at'] = str(result['created_at'])
+        if result.get('result_id'):
+            result['result_id'] = str(result['result_id'])
+        if result.get('turn_id'):
+            result['turn_id'] = str(result['turn_id'])
+
+    return {"results": results, "count": len(results)}
+
+
+@app.get("/api/consultation/history/{session_id}")
+async def get_consultation_history_detail(
+    session_id: str,
+    _: bool = Depends(verify_auth_header)
+):
+    """상담 이력 상세 정보를 조회합니다.
+
+    세션 기본 정보, 대화 내용, AI 분석 결과를 통합하여 반환합니다.
+
+    Args:
+        session_id: 세션 UUID
+
+    Returns:
+        dict: 상담 이력 상세 정보
+    """
+    from uuid import UUID
+    try:
+        session_uuid = UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID format")
+
+    # 세션 기본 정보 조회
+    session_repo = get_session_repository()
+    session_info = await session_repo.get_session(session_uuid)
+    if not session_info:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 대화 내용 조회
+    transcript_repo = get_transcript_repository()
+    transcripts = await transcript_repo.get_session_transcripts(session_uuid, limit=200)
+
+    # AI 분석 결과 조회
+    result_repo = get_agent_result_repository()
+    analysis_results = await result_repo.get_session_results(session_uuid)
+
+    # 상담 시간 계산
+    duration = None
+    if session_info.get('started_at') and session_info.get('ended_at'):
+        try:
+            started = session_info['started_at']
+            ended = session_info['ended_at']
+            if hasattr(started, 'timestamp') and hasattr(ended, 'timestamp'):
+                diff_seconds = int((ended - started).total_seconds())
+                minutes = diff_seconds // 60
+                seconds = diff_seconds % 60
+                duration = f"{minutes}분 {seconds}초"
+        except Exception:
+            pass
+
+    # datetime/UUID 변환
+    for transcript in transcripts:
+        if transcript.get('timestamp'):
+            ts = transcript['timestamp']
+            if hasattr(ts, 'strftime'):
+                transcript['timestamp'] = ts.strftime('%H:%M:%S')
+            else:
+                transcript['timestamp'] = str(ts)
+        # speaker_type → speaker_role 통일
+        if 'speaker_type' in transcript:
+            transcript['speaker_role'] = transcript.pop('speaker_type')
+
+    for result in analysis_results:
+        if result.get('created_at'):
+            result['created_at'] = str(result['created_at'])
+        if result.get('result_id'):
+            result['result_id'] = str(result['result_id'])
+
+    return {
+        "session_id": session_id,
+        "consultation_date": str(session_info.get('started_at', ''))[:19].replace('T', ' ') if session_info.get('started_at') else None,
+        "consultation_type": session_info.get('consultation_type'),
+        "agent_name": session_info.get('agent_name'),
+        "customer_name": session_info.get('customer_name'),
+        "duration": duration,
+        "final_summary": session_info.get('final_summary'),
+        "status": session_info.get('status'),
+        "transcripts": transcripts,
+        "analysis_results": analysis_results
+    }
+
+
+# ============================================================================
+# 상담사 관리 API
+# ============================================================================
+
+
+class AgentRegisterRequest(BaseModel):
+    """상담사 등록 요청 모델."""
+    agent_code: str
+    agent_name: str
+
+
+class AgentLoginRequest(BaseModel):
+    """상담사 로그인 요청 모델."""
+    agent_code: str
+    agent_name: str
+
+
+@app.post("/api/agent/register")
+async def register_agent(
+    request: AgentRegisterRequest,
+    _: bool = Depends(verify_auth_header)
+):
+    """새로운 상담사를 등록합니다.
+
+    Args:
+        request: 상담사 등록 요청
+            - agent_code: 상담사 코드 (사번)
+            - agent_name: 상담사 이름
+
+    Returns:
+        dict: 등록 결과
+    """
+    if not request.agent_code or not request.agent_name:
+        raise HTTPException(status_code=400, detail="상담사 코드와 이름을 모두 입력해주세요")
+
+    agent_repo = get_agent_repository()
+    agent_id = await agent_repo.register_agent(request.agent_code, request.agent_name)
+
+    if agent_id is None:
+        raise HTTPException(status_code=400, detail="이미 등록된 상담사 코드이거나 등록에 실패했습니다")
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "agent_code": request.agent_code,
+        "agent_name": request.agent_name,
+        "message": "상담사 등록이 완료되었습니다"
+    }
+
+
+@app.post("/api/agent/login")
+async def agent_login(
+    request: AgentLoginRequest,
+    _: bool = Depends(verify_auth_header)
+):
+    """상담사 로그인 (코드와 이름으로 조회).
+
+    Args:
+        request: 로그인 요청
+            - agent_code: 상담사 코드 (사번)
+            - agent_name: 상담사 이름
+
+    Returns:
+        dict: 상담사 정보
+    """
+    if not request.agent_code or not request.agent_name:
+        raise HTTPException(status_code=400, detail="상담사 코드와 이름을 모두 입력해주세요")
+
+    agent_repo = get_agent_repository()
+    agent = await agent_repo.find_agent(request.agent_code, request.agent_name)
+
+    if agent is None:
+        raise HTTPException(status_code=404, detail="등록되지 않은 상담사이거나 정보가 일치하지 않습니다")
+
+    # datetime 변환
+    if agent.get('created_at'):
+        agent['created_at'] = str(agent['created_at'])
+
+    return {
+        "success": True,
+        "agent": agent
+    }
+
+
+@app.get("/api/agent/{agent_id}/sessions")
+async def get_agent_sessions(
+    agent_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    _: bool = Depends(verify_auth_header)
+):
+    """상담사의 상담 세션 목록을 조회합니다.
+
+    Args:
+        agent_id: 상담사 DB ID
+        limit: 조회 개수 제한 (기본값: 20, 최대: 100)
+
+    Returns:
+        dict: 세션 목록
+    """
+    agent_repo = get_agent_repository()
+
+    # 상담사 존재 확인
+    agent = await agent_repo.get_agent_by_id(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="상담사를 찾을 수 없습니다")
+
+    sessions = await agent_repo.get_agent_sessions(agent_id, limit)
+
+    return {
+        "agent": {
+            "agent_id": agent['agent_id'],
+            "agent_code": agent['agent_code'],
+            "agent_name": agent['agent_name']
+        },
+        "sessions": sessions,
+        "count": len(sessions)
+    }
+
+
 @app.get("/api/rag/health")
 async def rag_health_check():
     """RAG 서버 상태를 확인합니다.
@@ -672,6 +1043,70 @@ async def health_check():
             "redis": redis_status,
         }
     }
+
+
+# ============================================================
+# Frontend Log Collection (Development Only)
+# ============================================================
+class FrontendLogEntry(BaseModel):
+    """프론트엔드 로그 엔트리."""
+    level: str  # DEBUG, INFO, WARN, ERROR
+    message: str
+    timestamp: str  # ISO 8601 format
+    context: Optional[Dict[str, Any]] = None
+
+
+class FrontendLogRequest(BaseModel):
+    """프론트엔드 로그 요청."""
+    logs: List[FrontendLogEntry]
+
+
+# Frontend log file path
+FRONTEND_LOG_DIR = "logs/frontend"
+
+
+@app.post("/api/logs/frontend")
+async def receive_frontend_logs(request: FrontendLogRequest):
+    """프론트엔드 로그를 수신하여 파일로 저장합니다 (개발용).
+
+    Args:
+        request: 로그 엔트리 목록
+
+    Returns:
+        dict: 처리 결과
+    """
+    # 개발 환경에서만 허용
+    if ENV == "production":
+        raise HTTPException(status_code=403, detail="Frontend logging disabled in production")
+
+    if not request.logs:
+        return {"status": "ok", "count": 0}
+
+    # 로그 디렉토리 생성
+    os.makedirs(FRONTEND_LOG_DIR, exist_ok=True)
+
+    # 오늘 날짜의 로그 파일
+    from datetime import datetime
+    today = datetime.now().strftime("%Y%m%d")
+    log_file = os.path.join(FRONTEND_LOG_DIR, f"frontend_{today}.log")
+
+    # 로그 기록
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            for entry in request.logs:
+                # 포맷: timestamp [LEVEL] message {context}
+                context_str = ""
+                if entry.context:
+                    import json
+                    context_str = f" {json.dumps(entry.context, ensure_ascii=False)}"
+                line = f"{entry.timestamp} [{entry.level.upper()}] {entry.message}{context_str}\n"
+                f.write(line)
+
+        logger.debug(f"Frontend logs received: {len(request.logs)} entries")
+        return {"status": "ok", "count": len(request.logs)}
+    except Exception as e:
+        logger.error(f"Failed to write frontend logs: {e}")
+        raise HTTPException(status_code=500, detail="Failed to write logs")
 
 
 @app.websocket("/ws")
@@ -786,8 +1221,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
           # IMPORTANT: aiortc gives us the candidate object, we need to convert it
           # The candidate string already has "candidate:" prefix, don't add it again
 
-          # DEBUG: Log the raw candidate object
-          logger.info(f"Raw candidate from aiortc: candidate={candidate.candidate}, sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
+          # Log the raw candidate object
+          logger.debug(f"Raw candidate from aiortc: sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
 
           candidate_dict = {
               "candidate": candidate.candidate,  # Already has "candidate:" prefix
@@ -795,7 +1230,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
               "sdpMLineIndex": candidate.sdpMLineIndex
           }
 
-          logger.info(f"Converted candidate_dict: {candidate_dict}")
+          logger.debug(f"Converted candidate_dict: sdpMid={candidate_dict.get('sdpMid')}")
 
           # Broadcast ICE candidate to ALL peers in the same room
           room_name = peer_manager.get_peer_room(source_peer_id)
@@ -970,9 +1405,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
             if message_type == "join_room":
                 # Handle room join
-                room_name = data.get("data", {}).get("room_name")
-                nickname = data.get("data", {}).get("nickname", "Anonymous")
-                phone_number = data.get("data", {}).get("phone_number")
+                join_data = data.get("data", {})
+                room_name = join_data.get("room_name")
+                nickname = join_data.get("nickname", "Anonymous")
+                phone_number = join_data.get("phone_number")
+                agent_code = join_data.get("agent_code")
+
+                # 디버그 로그: join_room 수신 데이터
+                logger.debug(f"[join_room] room={room_name}, nickname={nickname}, agent_code={agent_code}")
 
                 if not room_name:
                     await websocket.send_json({
@@ -984,16 +1424,56 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 # 고객 정보 조회 (phone_number가 있는 경우 = 고객인 경우)
                 customer_info = None
                 consultation_history = []
+                logger.debug(f"phone_number check: has_value={bool(phone_number)}")
                 if phone_number:
                     customer_repo = CustomerRepository()
-                    customer_info = await customer_repo.find_customer(nickname, phone_number)
+                    logger.info(f"[고객조회] 시작 - name='{nickname}', phone='{phone_number}', db_initialized={customer_repo.db.is_initialized}")
+                    try:
+                        customer_info = await customer_repo.find_customer(nickname, phone_number)
+                        logger.info(f"[고객조회] 결과 - customer_info={customer_info is not None}")
+                    except Exception as e:
+                        logger.error(f"[고객조회] 예외 발생 - {e}")
+                        customer_info = None
+
                     if customer_info:
-                        consultation_history = await customer_repo.get_consultation_history(
-                            customer_info['customer_id']
-                        )
-                        logger.info(f"Found customer '{nickname}' with {len(consultation_history)} consultation history")
+                        logger.info(f"Found customer '{nickname}' ({phone_number}), customer_id: {customer_info.get('customer_id')}")
+                        # 먼저 고객 정보 저장 (상담 이력 조회 실패해도 고객 정보는 유지)
+                        room_manager.set_customer_info(room_name, customer_info, [])
+
+                        # 상담 이력은 별도로 조회 (실패해도 고객 정보 영향 없음)
+                        try:
+                            consultation_history = await customer_repo.get_consultation_history(
+                                customer_info['customer_id']
+                            )
+                            logger.info(f"Found {len(consultation_history)} consultation history for customer")
+                            # 상담 이력이 있으면 업데이트
+                            if consultation_history:
+                                room_manager.set_customer_info(room_name, customer_info, consultation_history)
+                        except Exception as e:
+                            logger.error(f"Failed to get consultation history: {e}")
+                            # 상담 이력 조회 실패해도 고객 정보는 이미 저장됨
                     else:
                         logger.info(f"Customer not found: '{nickname}' ({phone_number})")
+
+                # 상담사 정보 조회 (agent_code가 있는 경우 = 상담사인 경우)
+                agent_info = None
+                if agent_code:
+                    agent_repo = get_agent_repository()
+                    logger.info(f"Looking up agent: code='{agent_code}', name='{nickname}', db_initialized={agent_repo.db.is_initialized}")
+                    agent_info = await agent_repo.find_agent(agent_code, nickname)
+                    logger.info(f"Agent lookup result: {agent_info}")
+                    if agent_info:
+                        # 방에 상담사 정보 저장 (세션 저장 시 연결용)
+                        room_manager.set_agent_info(room_name, agent_info)
+                        logger.info(f"Agent identified: '{nickname}' ({agent_code}), agent_id: {agent_info.get('agent_id')}")
+                    else:
+                        # 등록된 상담사가 없으면 에러
+                        logger.warning(f"Agent not found: '{nickname}' ({agent_code})")
+                        await websocket.send_json({
+                            "type": "error",
+                            "data": {"message": f"등록되지 않은 상담사입니다: {agent_code}"}
+                        })
+                        continue
 
                 # Join room (phone_number가 있으면 고객으로 판별)
                 is_customer = phone_number is not None
@@ -1002,7 +1482,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
                 # 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
                 if room_name == "stt-comparison-room":
-                    logger.info(f"Skipping agent creation for STT comparison room")
+                    logger.debug(f"Skipping agent creation for STT comparison room")
                     agent = None
                 else:
                     logger.info(f"Creating/getting agent for room '{room_name}'")
@@ -1011,6 +1491,37 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
                 # 에이전트 준비 완료 알림 전송 (STT 비교 룸은 제외)
                 if agent is not None:
+                    logger.debug(f"[session_check] agent={agent is not None}, agent_info={agent_info is not None}")
+                    # 상담사가 방을 생성한 경우 세션 시작
+                    if agent_info:
+                        # room_db_id 확인 (비동기 생성 대기)
+                        room_db_id = room_manager.room_db_ids.get(room_name)
+                        if room_db_id is None:
+                            # 룸 DB 저장이 완료될 때까지 최대 1초 대기
+                            for _ in range(10):
+                                await asyncio.sleep(0.1)
+                                room_db_id = room_manager.room_db_ids.get(room_name)
+                                if room_db_id:
+                                    break
+
+                        # 기존 고객 정보 조회 (고객이 먼저 입장한 경우)
+                        session_customer_id = None
+                        session_customer_info, session_consultation_history = room_manager.get_customer_info(room_name)
+                        if session_customer_info:
+                            session_customer_id = session_customer_info.get('customer_id')
+                            # 고객 컨텍스트도 설정
+                            agent.set_customer_context(session_customer_info, session_consultation_history)
+                            logger.info(f"[세션] 기존 고객 정보 발견 - customer_id={session_customer_id}, name={session_customer_info.get('customer_name')}")
+
+                        logger.info(f"Starting session - agent_info: {agent_info}, room_db_id: {room_db_id}, customer_id={session_customer_id}, save_to_db: {agent.save_to_db}")
+                        session_id = await agent.start_session(
+                            agent_name=nickname,
+                            room_id=room_db_id,
+                            agent_id=str(agent_info.get('agent_id')),
+                            customer_id=session_customer_id
+                        )
+                        logger.info(f"Started consultation session: session_id={session_id}, agent={nickname} ({agent_info.get('agent_code')}), customer_id={session_customer_id}")
+
                     await broadcast_to_room(
                         room_name,
                         {
@@ -1024,17 +1535,32 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 # Get other peers in room
                 other_peers = room_manager.get_other_peers(room_name, peer_id)
 
+                # 상담사인 경우 기존 고객 정보 조회
+                existing_customer_info = None
+                existing_consultation_history = []
+                if not is_customer:
+                    existing_customer_info, existing_consultation_history = room_manager.get_customer_info(room_name)
+                    if existing_customer_info:
+                        logger.info(f"Agent joined room with existing customer: {existing_customer_info.get('customer_name')}")
+
                 # Send room joined confirmation
+                room_joined_data = {
+                    "room_name": room_name,
+                    "peer_count": room_manager.get_room_count(room_name),
+                    "other_peers": [
+                        {"peer_id": p.peer_id, "nickname": p.nickname}
+                        for p in other_peers
+                    ]
+                }
+                # 상담사인 경우 기존 고객 정보 포함
+                if existing_customer_info:
+                    room_joined_data["customer_info"] = existing_customer_info
+                if existing_consultation_history:
+                    room_joined_data["consultation_history"] = existing_consultation_history
+
                 await websocket.send_json({
                     "type": "room_joined",
-                    "data": {
-                        "room_name": room_name,
-                        "peer_count": room_manager.get_room_count(room_name),
-                        "other_peers": [
-                            {"peer_id": p.peer_id, "nickname": p.nickname}
-                            for p in other_peers
-                        ]
-                    }
+                    "data": room_joined_data
                 })
 
                 # Notify other peers in room (with customer info if available)
@@ -1043,8 +1569,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "nickname": nickname,
                     "peer_count": room_manager.get_room_count(room_name)
                 }
+                # 고객인 경우 phone_number 추가 (디버깅용)
+                if is_customer:
+                    user_joined_data["phone_number"] = phone_number
                 if customer_info:
                     user_joined_data["customer_info"] = customer_info
+                    logger.info(f"[user_joined] customer_info 포함: {customer_info.get('customer_name')}")
+                else:
+                    logger.warning(f"[user_joined] customer_info 없음 - is_customer={is_customer}, phone={phone_number}")
                 if consultation_history:
                     user_joined_data["consultation_history"] = consultation_history
 
@@ -1060,6 +1592,10 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 # 에이전트에 고객 컨텍스트 설정
                 if agent and customer_info:
                     agent.set_customer_context(customer_info, consultation_history)
+                    # 세션이 이미 시작된 경우 고객 정보 연결
+                    if agent.session_id and customer_info.get('customer_id'):
+                        await agent.update_session_customer(customer_info['customer_id'])
+                        logger.info(f"[세션] 고객 연결 완료 - session={agent.session_id}, customer_id={customer_info['customer_id']}")
 
                 # Renegotiation will be triggered when tracks are actually received
                 # on_track_received 콜백에서 트랙 수신 시 자동으로 renegotiation 요청됨
@@ -1168,16 +1704,21 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     try:
                         agent = room_agents.get(current_room)
                         if agent and agent.session_id:
+                            # Get transcript count before ending session
+                            conversation_history = agent.state.get("conversation_history", [])
+                            transcript_count = len(conversation_history)
+
                             # End the session - LLM will generate structured final summary
                             success = await agent.end_session()
-                            logger.info(f"Session ended for room '{current_room}': success={success}")
+                            logger.info(f"Session ended for room '{current_room}': success={success}, transcripts={transcript_count}")
 
                             await websocket.send_json({
                                 "type": "session_ended",
                                 "data": {
                                     "success": success,
                                     "session_id": str(agent.session_id) if agent.session_id else None,
-                                    "message": "Consultation session saved successfully" if success else "Failed to save session"
+                                    "transcript_count": transcript_count,
+                                    "message": f"상담 세션이 저장되었습니다 (대화 {transcript_count}턴)" if success else "세션 저장에 실패했습니다"
                                 }
                             })
                         else:
@@ -1187,7 +1728,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                                 "data": {
                                     "success": True,
                                     "session_id": None,
-                                    "message": "No session to save"
+                                    "transcript_count": 0,
+                                    "message": "저장할 세션이 없습니다"
                                 }
                             })
                     except Exception as e:
@@ -1197,7 +1739,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                             "data": {
                                 "success": False,
                                 "session_id": None,
-                                "message": f"Error: {str(e)}"
+                                "transcript_count": 0,
+                                "message": f"오류: {str(e)}"
                             }
                         })
                 else:
@@ -1206,7 +1749,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         "data": {
                             "success": True,
                             "session_id": None,
-                            "message": "Not in a room"
+                            "transcript_count": 0,
+                            "message": "상담 방에 참여하고 있지 않습니다"
                         }
                     })
 
