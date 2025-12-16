@@ -138,6 +138,15 @@ class RoomManager:
         # room_name -> DB UUID (DB 룸 ID 매핑)
         self.room_db_ids: Dict[str, UUID] = {}
 
+        # room_name -> customer info (방별 고객 정보 저장)
+        self.room_customer_info: Dict[str, Dict] = {}
+
+        # room_name -> consultation history (방별 상담 이력 저장)
+        self.room_consultation_history: Dict[str, List[Dict]] = {}
+
+        # room_name -> agent info (방별 상담사 정보 저장)
+        self.room_agent_info: Dict[str, Dict] = {}
+
         # DB repositories (lazy init)
         self._room_repo = None
         self._transcript_repo = None
@@ -327,6 +336,9 @@ class RoomManager:
                     del self.room_start_times[room_name]
                 if room_name in self.room_db_ids:
                     del self.room_db_ids[room_name]
+                # 고객 정보 및 상담사 정보 정리
+                self.clear_customer_info(room_name)
+                self.clear_agent_info(room_name)
 
                 logger.info(f"[WebRTC] 룸 '{room_name}' 삭제됨 (빈 룸)")
             else:
@@ -633,3 +645,103 @@ class RoomManager:
             logger.info(f"[WebRTC] 룸 '{room_name}' 대화 저장 완료: {filepath} ({len(transcripts)}개 메시지)")
         except Exception as e:
             logger.error(f"[WebRTC] 룸 '{room_name}' 대화 저장 실패: {e}")
+
+    def set_customer_info(
+        self,
+        room_name: str,
+        customer_info: Dict,
+        consultation_history: List[Dict]
+    ) -> None:
+        """방에 고객 정보와 상담 이력을 저장합니다.
+
+        고객이 방에 입장할 때 호출되어, 상담사가 나중에 입장하거나
+        새로고침해도 고객 정보를 조회할 수 있게 합니다.
+
+        Args:
+            room_name: 룸 이름
+            customer_info: 고객 정보 딕셔너리
+            consultation_history: 상담 이력 리스트
+        """
+        self.room_customer_info[room_name] = customer_info
+        self.room_consultation_history[room_name] = consultation_history
+        logger.info(f"[WebRTC] 룸 '{room_name}' 고객 정보 저장: {customer_info.get('customer_name', 'Unknown')}")
+
+    def get_customer_info(self, room_name: str) -> tuple:
+        """방의 고객 정보와 상담 이력을 조회합니다.
+
+        Args:
+            room_name: 룸 이름
+
+        Returns:
+            tuple: (customer_info, consultation_history)
+                   고객 정보가 없으면 (None, [])
+        """
+        customer_info = self.room_customer_info.get(room_name)
+        consultation_history = self.room_consultation_history.get(room_name, [])
+        return customer_info, consultation_history
+
+    def clear_customer_info(self, room_name: str) -> None:
+        """방의 고객 정보를 삭제합니다.
+
+        Args:
+            room_name: 룸 이름
+        """
+        if room_name in self.room_customer_info:
+            del self.room_customer_info[room_name]
+        if room_name in self.room_consultation_history:
+            del self.room_consultation_history[room_name]
+
+    def set_agent_info(self, room_name: str, agent_info: Dict) -> None:
+        """방에 상담사 정보를 저장합니다.
+
+        상담사가 방을 생성할 때 호출되어, 세션 저장 시 상담사 ID를 연결할 수 있게 합니다.
+
+        Args:
+            room_name: 룸 이름
+            agent_info: 상담사 정보 딕셔너리 (agent_id, agent_code, agent_name)
+        """
+        self.room_agent_info[room_name] = agent_info
+        logger.info(f"[WebRTC] 룸 '{room_name}' 상담사 정보 저장: {agent_info.get('agent_name', 'Unknown')} ({agent_info.get('agent_code', '')})")
+
+    def get_agent_info(self, room_name: str) -> Optional[Dict]:
+        """방의 상담사 정보를 조회합니다.
+
+        Args:
+            room_name: 룸 이름
+
+        Returns:
+            상담사 정보 딕셔너리 또는 None
+        """
+        return self.room_agent_info.get(room_name)
+
+    def clear_agent_info(self, room_name: str) -> None:
+        """방의 상담사 정보를 삭제합니다.
+
+        Args:
+            room_name: 룸 이름
+        """
+        if room_name in self.room_agent_info:
+            del self.room_agent_info[room_name]
+
+    async def broadcast_to_room(
+        self,
+        room_name: str,
+        message: dict,
+        exclude: list = None
+    ) -> None:
+        """특정 룸의 모든 참가자에게 메시지를 브로드캐스트합니다.
+
+        Args:
+            room_name: 메시지를 전송할 룸 이름
+            message: 전송할 메시지 딕셔너리
+            exclude: 메시지를 받지 않을 peer_id 리스트
+        """
+        exclude = exclude or []
+        peers = self.get_room_peers(room_name)
+
+        for peer in peers:
+            if peer.peer_id not in exclude:
+                try:
+                    await peer.websocket.send_json(message)
+                except Exception as e:
+                    logger.error(f"[WebRTC] 브로드캐스트 실패 ({peer.peer_id}): {e}")

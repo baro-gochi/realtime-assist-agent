@@ -79,9 +79,9 @@ def _ensure_cache_setup():
         _cache_setup_done = True
         if setup_global_llm_cache():
             stats = get_cache_stats()
-            logger.info(f"[LLM Cache] Setup complete: {stats}")
+            logger.info(f"[캐시] LLM 캐시 설정 완료: {stats}")
         else:
-            logger.info("[LLM Cache] Cache not enabled or setup failed")
+            logger.info("[캐시] LLM 캐시 비활성화 또는 설정 실패")
 
 
 class RoomAgent:
@@ -109,7 +109,7 @@ class RoomAgent:
         _ensure_cache_setup()
 
         # LLM 인스턴스 초기화 (클래스 생성 시 실행)
-        logger.info(f"Initializing LLM: {llm_config.MODEL}")
+        logger.info(f"[에이전트] LLM 초기화 중: {llm_config.MODEL}")
 
         try:
             llm = init_chat_model(
@@ -130,9 +130,9 @@ class RoomAgent:
             # 하위 호환성을 위한 system_message 유지
             self.system_message = self.static_system_prefix
 
-            logger.info("LLM 초기화 성공")
+            # logger.info("LLM 초기화 성공")
         except Exception as e:
-            logger.error(f"LLM 초기화 실패: {e}")
+            logger.error(f"[에이전트] LLM 초기화 실패: {e}")
             llm = None
             self._base_system_message = None
             self.static_system_prefix = None
@@ -141,14 +141,14 @@ class RoomAgent:
         # 최종 요약 전용 LLM 초기화
         summary_llm = None
         try:
-            logger.info(f"Initializing Summary LLM: {summary_llm_config.MODEL}")
+            logger.info(f"[에이전트] 요약 LLM 초기화 중: {summary_llm_config.MODEL}")
             summary_llm = init_chat_model(
                 summary_llm_config.MODEL,
                 temperature=summary_llm_config.TEMPERATURE,
             )
-            logger.info("Summary LLM 초기화 성공")
+            logger.info("[에이전트] 요약 LLM 초기화 성공")
         except Exception as e:
-            logger.error(f"Summary LLM 초기화 실패: {e}")
+            logger.error(f"[에이전트] 요약 LLM 초기화 실패: {e}")
             summary_llm = None
 
         self.room_name = room_name
@@ -163,7 +163,7 @@ class RoomAgent:
             self.graph = create_agent_graph(llm)
         else:
             self.graph = None
-            logger.warning(f"RoomAgent for '{room_name}' 생성됨 (LLM 없음)")
+            logger.warning(f"[에이전트] RoomAgent 생성됨 (LLM 없음): {room_name}")
 
         self.state: ConversationState = {
             "room_name": room_name,
@@ -187,9 +187,11 @@ class RoomAgent:
             "last_risk_index": 0,
             "last_rag_index": 0,
             "last_faq_index": 0,
+            "last_rag_intent": "",
+            "last_faq_query": "",
         }
 
-        logger.info(f"RoomAgent 생성 for room: {room_name}")
+        logger.info(f"[에이전트] RoomAgent 생성: {room_name}")
 
     async def on_new_transcript(
         self,
@@ -240,10 +242,10 @@ class RoomAgent:
             self.state["has_new_customer_turn"] = True
 
         logger.info(
-            f"New transcript in room '{self.room_name}': "
+            f"[에이전트] 새 전사: {self.room_name} - "
             f"{speaker_name}: {text[:50]}..."
         )
-        logger.info(f"Current conversation history count: {len(self.state['conversation_history'])}")
+        logger.info(f"[에이전트] 대화 이력 수: {len(self.state['conversation_history'])}")
 
         # DB에 전사 저장
         await self._save_transcript(
@@ -269,11 +271,11 @@ class RoomAgent:
 
         # LLM 없으면 요약 생성 스킵 (transcript는 이미 추가됨)
         if not self.llm_available:
-            logger.warning(f"[Agent] LLM 없음 - 방 : '{self.room_name}'")
+            logger.warning(f"[에이전트] LLM 없음: {self.room_name}")
             return {"error": {"message": "LLM not available"}}
 
         # LangGraph 스트리밍 실행 (stream_mode="updates"로 노드별 업데이트 전달)
-        logger.info(f"Starting graph.astream (updates) for room '{self.room_name}'")
+        logger.info(f"[에이전트] 그래프 스트리밍 시작: {self.room_name}")
         stream_turn_id = turn_id or f"{self.room_name}-{int(time.time() * 1000)}"
 
         try:
@@ -337,18 +339,18 @@ class RoomAgent:
             # 그래프 실행 완료 후 고객 발화 플래그 리셋
             self.state["has_new_customer_turn"] = False
 
-            # 인덱스 업데이트 (그래프에서 반환한 값 사용)
-            for idx_key in ["last_intent_index", "last_sentiment_index", "last_draft_index", "last_risk_index", "last_rag_index", "last_faq_index"]:
+            # 인덱스 및 쿼리 업데이트 (그래프에서 반환한 값 사용)
+            for idx_key in ["last_intent_index", "last_sentiment_index", "last_draft_index", "last_risk_index", "last_rag_index", "last_faq_index", "last_rag_intent", "last_faq_query"]:
                 if idx_key in latest_updates:
                     self.state[idx_key] = latest_updates[idx_key]
 
-            logger.info(f"Summary generated (JSON): {current_summary[:100]}...")
-            logger.info(f"Last summarized index: {last_summarized_index}")
-            logger.info(f"Intent: {intent_result}, Sentiment: {sentiment_result}, Risk: {risk_result}")
+            logger.info(f"[에이전트] 요약 생성: {current_summary[:100]}...")
+            logger.info(f"[에이전트] 요약 인덱스: {last_summarized_index}")
+            logger.info(f"[에이전트] 의도: {intent_result}, 감정: {sentiment_result}, 위험: {risk_result}")
             if rag_policy_result:
-                logger.info(f"RAG Policy: {len(rag_policy_result.get('recommendations', []))} recommendations")
+                logger.info(f"[RAG] 정책 결과: {len(rag_policy_result.get('recommendations', []))}개 추천")
             if faq_result:
-                logger.info(f"FAQ: {len(faq_result.get('faqs', []))} items, cache_hit={faq_result.get('cache_hit')}")
+                logger.info(f"[FAQ] 결과: {len(faq_result.get('faqs', []))}개, 캐시={faq_result.get('cache_hit')}")
 
             # DB에 에이전트 결과 저장
             await self._save_agent_results(
@@ -374,7 +376,7 @@ class RoomAgent:
             }
 
         except Exception as e:
-            logger.error(f"Error in agent execution: {e}", exc_info=True)
+            logger.error(f"[에이전트] 실행 오류: {e}", exc_info=True)
             return {"error": {"message": str(e)}}
     
 
@@ -384,7 +386,7 @@ class RoomAgent:
         Note:
             방이 종료되거나 새로운 세션을 시작할 때 사용
         """
-        logger.info(f"Resetting agent for room: {self.room_name}")
+        logger.info(f"[에이전트] 상태 초기화: {self.room_name}")
         self.state = {
             "room_name": self.room_name,
             "conversation_history": [],
@@ -407,6 +409,8 @@ class RoomAgent:
             "last_risk_index": 0,
             "last_rag_index": 0,
             "last_faq_index": 0,
+            "last_rag_intent": "",
+            "last_faq_query": "",
         }
         # 정적 시스템 메시지 초기화 (캐싱 일관성 유지)
         self.static_system_prefix = self._base_system_message
@@ -437,12 +441,16 @@ class RoomAgent:
         Returns:
             생성된 세션 UUID 또는 None
         """
+        logger.info(f"[에이전트] 세션 시작 요청 - room={self.room_name}, agent={agent_name}, room_id={room_id} (type={type(room_id).__name__})")
+
         if not self.save_to_db:
-            logger.debug(f"DB 저장 비활성화됨 - 세션 생성 스킵")
+            logger.warning(f"[에이전트] 세션 생성 스킵: save_to_db=False (room={self.room_name})")
             return None
 
         session_repo, _, _ = _get_repositories()
+        logger.debug(f"[에이전트] 세션 레포지토리 획득 완료")
 
+        logger.info(f"[에이전트] 세션 생성 호출 중 - agent={agent_name}, room_id={room_id}, agent_id={agent_id}")
         self.session_id = await session_repo.create_session(
             agent_name=agent_name,
             room_id=room_id,
@@ -454,9 +462,9 @@ class RoomAgent:
 
         if self.session_id:
             self._turn_index = 0
-            logger.info(f"Started consultation session: {self.session_id} for room '{self.room_name}'")
+            logger.info(f"[에이전트] 세션 시작 성공 - session_id={self.session_id}, room={self.room_name}")
         else:
-            logger.warning(f"Failed to start session for room '{self.room_name}'")
+            logger.error(f"[에이전트] 세션 시작 실패 - room={self.room_name}, room_id={room_id}")
 
         return self.session_id
 
@@ -476,12 +484,12 @@ class RoomAgent:
         # 요약 전용 LLM 사용, 없으면 기본 LLM 폴백
         llm_to_use = self.summary_llm or self.llm
         if not llm_to_use:
-            logger.warning("No LLM available for final summary generation")
+            logger.warning("[에이전트] 최종 요약 LLM 없음")
             return {}
 
         conversation_history = self.state.get("conversation_history", [])
         if not conversation_history:
-            logger.warning("No conversation history for final summary")
+            logger.warning("[에이전트] 대화 이력 없음, 최종 요약 불가")
             return {}
 
         # 대화 내역을 텍스트로 변환
@@ -503,18 +511,22 @@ class RoomAgent:
                 HumanMessage(content=f"## 전체 상담 대화\n\n{conversation_text}")
             ]
 
-            logger.info(f"Generating final summary for {len(conversation_history)} turns")
+            logger.info(f"[에이전트] 최종 요약 생성 중: {len(conversation_history)}개 턴")
             start_time = time.time()
 
             result = await structured_llm.ainvoke(messages)
 
             elapsed = time.time() - start_time
-            logger.info(f"Final summary generated in {elapsed:.2f}s")
+            logger.info(f"[에이전트] 최종 요약 완료: {elapsed:.2f}s")
+
+            # LLM 반환값 확인
+            logger.debug(f"generate_final_summary result type: {type(result).__name__}")
+            logger.debug(f"consultation_type: {result.get('consultation_type') if isinstance(result, dict) else 'N/A'}")
 
             return result if isinstance(result, dict) else {}
 
         except Exception as e:
-            logger.error(f"Failed to generate final summary: {e}")
+            logger.error(f"[에이전트] 최종 요약 실패: {e}")
             return {}
 
     def _format_final_summary_text(self, summary_data: Dict[str, Any]) -> str:
@@ -565,23 +577,37 @@ class RoomAgent:
         Returns:
             성공 여부
         """
-        if not self.save_to_db or not self.session_id:
+        logger.info(f"[에이전트] 세션 종료 요청 - room={self.room_name}, session_id={self.session_id}")
+
+        if not self.save_to_db:
+            logger.warning(f"[에이전트] 세션 종료 스킵: save_to_db=False")
+            return False
+
+        if not self.session_id:
+            logger.warning(f"[에이전트] 세션 종료 스킵: session_id가 None (room={self.room_name})")
             return False
 
         session_repo, _, _ = _get_repositories()
 
         # 최종 요약이 없으면 LLM으로 구조화된 요약 생성
         if not final_summary:
+            logger.info(f"[에이전트] 최종 요약 생성 중...")
             summary_data = await self.generate_final_summary()
+            logger.debug(f"summary_data keys: {list(summary_data.keys()) if summary_data else 'None'}")
             if summary_data:
                 final_summary = self._format_final_summary_text(summary_data)
                 # 상담 유형도 자동 추출
                 if not consultation_type:
                     consultation_type = summary_data.get("consultation_type", "")
+                logger.debug(f"extracted consultation_type: '{consultation_type}'")
+                logger.info(f"[에이전트] 최종 요약 생성 완료 - type={consultation_type}")
             else:
                 # 폴백: 기존 실시간 요약 사용
                 final_summary = self.state.get("current_summary", "")
+                logger.warning(f"[에이전트] 최종 요약 생성 실패, 기존 요약 사용")
 
+        logger.info(f"[에이전트] 세션 종료 DB 저장 중 - session={self.session_id}")
+        logger.debug(f"end_session params: consultation_type='{consultation_type}', summary_len={len(final_summary) if final_summary else 0}")
         success = await session_repo.end_session(
             session_id=self.session_id,
             final_summary=final_summary,
@@ -589,7 +615,9 @@ class RoomAgent:
         )
 
         if success:
-            logger.info(f"Ended consultation session: {self.session_id}")
+            logger.info(f"[에이전트] 세션 종료 성공 - session_id={self.session_id}")
+        else:
+            logger.error(f"[에이전트] 세션 종료 실패 - session_id={self.session_id}")
 
         return success
 
@@ -628,14 +656,22 @@ class RoomAgent:
         Returns:
             성공 여부
         """
-        if not self.save_to_db or not self.session_id:
+        logger.debug(f"[에이전트] 전사 저장 시도 - save_to_db={self.save_to_db}, session_id={self.session_id}")
+
+        if not self.save_to_db:
+            logger.debug("[에이전트] 전사 저장 스킵: save_to_db=False")
+            return False
+
+        if not self.session_id:
+            logger.warning(f"[에이전트] 전사 저장 스킵: session_id가 None (room={self.room_name})")
             return False
 
         _, transcript_repo, _ = _get_repositories()
 
         self._turn_index += 1
+        logger.info(f"[에이전트] 전사 저장 중 - session={self.session_id}, turn={self._turn_index}, speaker={speaker_name}")
 
-        return await transcript_repo.add_transcript(
+        result = await transcript_repo.add_transcript(
             session_id=self.session_id,
             turn_index=self._turn_index,
             speaker_type=speaker_type,
@@ -644,6 +680,13 @@ class RoomAgent:
             timestamp=timestamp,
             confidence=confidence
         )
+
+        if result:
+            logger.info(f"[에이전트] 전사 저장 완료 - turn={self._turn_index}")
+        else:
+            logger.error(f"[에이전트] 전사 저장 실패 - turn={self._turn_index}")
+
+        return result
 
     async def _save_agent_results(
         self,
@@ -666,8 +709,31 @@ class RoomAgent:
             faq_result: FAQ 검색 결과
             risk_result: 리스크 분석 결과
         """
-        if not self.save_to_db or not self.session_id:
+        result_types = []
+        if intent_result:
+            result_types.append("intent")
+        if sentiment_result:
+            result_types.append("sentiment")
+        if summary_result:
+            result_types.append("summary")
+        if rag_result:
+            result_types.append("rag")
+        if faq_result:
+            result_types.append("faq")
+        if risk_result:
+            result_types.append("risk")
+
+        logger.debug(f"[에이전트] 결과 저장 시도 - save_to_db={self.save_to_db}, session_id={self.session_id}, types={result_types}")
+
+        if not self.save_to_db:
+            logger.debug("[에이전트] 결과 저장 스킵: save_to_db=False")
             return
+
+        if not self.session_id:
+            logger.warning(f"[에이전트] 결과 저장 스킵: session_id가 None (room={self.room_name})")
+            return
+
+        logger.info(f"[에이전트] 결과 저장 시작 - session={self.session_id}, types={result_types}")
 
         _, _, agent_result_repo = _get_repositories()
 
@@ -748,8 +814,8 @@ class RoomAgent:
             self.system_message = self.static_system_prefix
 
             logger.info(
-                f"[Caching] Static context updated for room '{self.room_name}': "
-                f"{customer_info.get('customer_name')} (size: {len(self.static_system_prefix)} chars)"
+                f"[캐시] 정적 컨텍스트 업데이트: {self.room_name} - "
+                f"{customer_info.get('customer_name')} ({len(self.static_system_prefix)}자)"
             )
 
     def _generate_customer_context(self, customer_info: dict, consultation_history: list) -> str:
@@ -809,9 +875,9 @@ def get_or_create_agent(room_name: str) -> RoomAgent:
     if room_name not in room_agents:
         agent = RoomAgent(room_name)
         room_agents[room_name] = agent
-        logger.info(f"New agent created for room: {room_name}")
+        logger.info(f"[에이전트] 새 에이전트 생성: {room_name}")
     else:
-        logger.debug(f"Reusing existing agent for room: {room_name}")
+        logger.debug(f"[에이전트] 기존 에이전트 재사용: {room_name}")
 
     return room_agents[room_name]
 
@@ -828,6 +894,6 @@ def remove_agent(room_name: str):
     """
     if room_name in room_agents:
         del room_agents[room_name]
-        logger.info(f"Agent removed for room: {room_name}")
+        logger.info(f"[에이전트] 에이전트 제거: {room_name}")
     else:
-        logger.warning(f"No agent found for room: {room_name}")
+        logger.warning(f"[에이전트] 에이전트 없음: {room_name}")

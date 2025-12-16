@@ -105,13 +105,13 @@ connection_config = ConnectionConfig()
 # 설정 로드 확인 로그
 # ============================================================
 
-logger.info(f"[WebRTC Config] .env 경로: {_env_path} (존재: {_env_path.exists()})")
-logger.info(f"[WebRTC Config] TURN 서버 설정 완료: {ice_config.has_turn_server}")
+logger.info(f"[WebRTC] 설정 로드: .env={_env_path} (존재: {_env_path.exists()})")
+logger.info(f"[WebRTC] TURN 서버 설정: {ice_config.has_turn_server}")
 if ice_config.TURN_SERVER_URL:
-    logger.info(f"[WebRTC Config] TURN URL: {ice_config.TURN_SERVER_URL}")
+    logger.info(f"[WebRTC] TURN URL: {ice_config.TURN_SERVER_URL}")
 if ice_config.STUN_SERVER_URL:
-    logger.info(f"[WebRTC Config] STUN URL: {ice_config.STUN_SERVER_URL}")
+    logger.info(f"[WebRTC] STUN URL: {ice_config.STUN_SERVER_URL}")
 else:
-    logger.info(f"[WebRTC Config] STUN URL: 기본 Google STUN 사용")
-logger.info(f"[WebRTC Config] STT 엔진: {connection_config.STT_ENGINE}")
-logger.info(f"[WebRTC Config] 오디오 샘플레이트: {connection_config.AUDIO_SAMPLE_RATE}Hz")
+    logger.info(f"[WebRTC] STUN URL: 기본 Google STUN 사용")
+logger.info(f"[WebRTC] STT 엔진: {connection_config.STT_ENGINE}")
+logger.info(f"[WebRTC] 오디오 샘플레이트: {connection_config.AUDIO_SAMPLE_RATE}Hz")

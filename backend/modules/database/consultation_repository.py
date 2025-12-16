@@ -47,13 +47,19 @@ class ConsultationSessionRepository:
         Returns:
             생성된 세션의 UUID 또는 None
         """
+        logger.info(f"[세션생성] 시작 - agent_name={agent_name}, room_id={room_id}, agent_id={agent_id}, channel={channel}")
+
         if not self.db.is_initialized:
-            logger.warning("Database not initialized, skipping session creation")
+            logger.warning("[세션생성] 실패: 데이터베이스 초기화 안됨")
             return None
+
+        logger.debug(f"[세션생성] DB 초기화 확인 완료")
 
         try:
             metadata_json = json.dumps(metadata or {})
+            logger.debug(f"[세션생성] 메타데이터 JSON 변환 완료: {metadata_json}")
 
+            logger.info(f"[세션생성] INSERT 실행 중 - room_id={room_id} (type={type(room_id).__name__})")
             session_id = await self.db.fetchval(
                 """
                 INSERT INTO consultation_sessions
@@ -63,10 +69,15 @@ class ConsultationSessionRepository:
                 """,
                 room_id, customer_id, agent_id, agent_name, channel, metadata_json
             )
-            logger.info(f"Created consultation session: {session_id}")
+
+            if session_id:
+                logger.info(f"[세션생성] 성공 - session_id={session_id}")
+            else:
+                logger.warning(f"[세션생성] 실패: session_id가 None으로 반환됨")
+
             return session_id
         except Exception as e:
-            logger.error(f"Failed to create consultation session: {e}")
+            logger.error(f"[세션생성] 예외 발생: {type(e).__name__}: {e}", exc_info=True)
             return None
 
     async def update_customer(
@@ -83,7 +94,9 @@ class ConsultationSessionRepository:
         Returns:
             성공 여부
         """
+        logger.info(f"[고객연결] 시작 - session_id={session_id}, customer_id={customer_id}")
         if not self.db.is_initialized:
+            logger.warning(f"[고객연결] 스킵: DB 미초기화")
             return False
 
         try:
@@ -95,10 +108,10 @@ class ConsultationSessionRepository:
                 """,
                 session_id, customer_id
             )
-            logger.info(f"Updated session {session_id} with customer_id {customer_id}")
+            logger.info(f"[고객연결] 성공 - session_id={session_id}, customer_id={customer_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to update customer for session {session_id}: {e}")
+            logger.error(f"[고객연결] 실패 - session_id={session_id}: {e}", exc_info=True)
             return False
 
     async def end_session(
@@ -117,19 +130,41 @@ class ConsultationSessionRepository:
         Returns:
             성공 여부
         """
+        logger.info(f"[세션종료] 시작 - session_id={session_id}, type={consultation_type}")
+        logger.debug(f"end_session params: consultation_type='{consultation_type}' (type: {type(consultation_type).__name__})")
+
         if not self.db.is_initialized:
+            logger.warning("[세션종료] 실패: 데이터베이스 초기화 안됨")
             return False
 
         try:
+            # 현재 세션 상태 확인
+            current_status = await self.db.fetchval(
+                "SELECT status FROM consultation_sessions WHERE session_id = $1",
+                session_id
+            )
+            logger.debug(f"current session status: {current_status}")
+
+            logger.info(f"[세션종료] DB 함수 호출 중 - end_consultation_session({session_id}, summary길이={len(final_summary) if final_summary else 0}, type='{consultation_type}')")
             result = await self.db.fetchval(
                 "SELECT end_consultation_session($1, $2, $3)",
                 session_id, final_summary, consultation_type
             )
+            logger.debug(f"DB function result: {result}")
+
             if result:
-                logger.info(f"Ended consultation session: {session_id}")
+                # 저장 후 확인
+                saved_type = await self.db.fetchval(
+                    "SELECT consultation_type FROM consultation_sessions WHERE session_id = $1",
+                    session_id
+                )
+                logger.debug(f"saved consultation_type in DB: '{saved_type}'")
+                logger.info(f"[세션종료] 성공 - session_id={session_id}")
+            else:
+                logger.warning(f"[세션종료] 결과 없음 - session_id={session_id} (status가 active가 아닐 수 있음)")
             return bool(result)
         except Exception as e:
-            logger.error(f"Failed to end session {session_id}: {e}")
+            logger.error(f"[세션종료] 예외 발생: {type(e).__name__}: {e}", exc_info=True)
             return False
 
     async def get_session(self, session_id: UUID) -> Optional[Dict[str, Any]]:
@@ -299,7 +334,10 @@ class ConsultationTranscriptRepository:
         Returns:
             성공 여부
         """
+        logger.debug(f"[전사저장] 시작 - session_id={session_id}, turn={turn_index}, speaker={speaker_name}")
+
         if not self.db.is_initialized:
+            logger.warning("[전사저장] 실패: 데이터베이스 초기화 안됨")
             return False
 
         try:
@@ -313,10 +351,10 @@ class ConsultationTranscriptRepository:
                 """,
                 session_id, turn_index, speaker_type, speaker_name, text, timestamp, confidence, is_final, source
             )
-            logger.debug(f"Saved transcript turn {turn_index} for session {session_id}")
+            logger.info(f"[전사저장] 성공 - session={session_id}, turn={turn_index}, text={text[:30]}...")
             return True
         except Exception as e:
-            logger.error(f"Failed to save transcript: {e}")
+            logger.error(f"[전사저장] 예외 발생: {type(e).__name__}: {e}", exc_info=True)
             return False
 
     async def add_transcripts_batch(
@@ -440,7 +478,10 @@ class ConsultationAgentResultRepository:
         Returns:
             성공 여부
         """
+        logger.debug(f"[결과저장] 시작 - session_id={session_id}, type={result_type}, turn_id={turn_id}")
+
         if not self.db.is_initialized:
+            logger.warning("[결과저장] 실패: 데이터베이스 초기화 안됨")
             return False
 
         try:
@@ -454,10 +495,10 @@ class ConsultationAgentResultRepository:
                 """,
                 session_id, turn_id, result_type, result_json, processing_time_ms, model_version
             )
-            logger.debug(f"Saved {result_type} result for session {session_id}")
+            logger.info(f"[결과저장] 성공 - session={session_id}, type={result_type}")
             return True
         except Exception as e:
-            logger.error(f"Failed to save agent result: {e}")
+            logger.error(f"[결과저장] 예외 발생: {type(e).__name__}: {e}", exc_info=True)
             return False
 
     async def save_intent(
@@ -640,3 +681,220 @@ def get_agent_result_repository() -> ConsultationAgentResultRepository:
     if _agent_result_repo is None:
         _agent_result_repo = ConsultationAgentResultRepository()
     return _agent_result_repo
+
+
+# ============================================================================
+# 상담사(Agent) 저장소
+# ============================================================================
+
+
+class AgentRepository:
+    """상담사 데이터 저장소.
+
+    상담사 등록, 조회, 상담 이력 조회 기능을 제공합니다.
+    agent_code는 사용자가 입력하는 사번/ID이고, agent_id는 DB의 auto-increment ID입니다.
+    """
+
+    def __init__(self):
+        self.db = get_db_manager()
+
+    async def register_agent(
+        self,
+        agent_code: str,
+        agent_name: str
+    ) -> Optional[int]:
+        """새로운 상담사를 등록합니다.
+
+        Args:
+            agent_code: 상담사 코드 (사번 등 사용자 입력 ID)
+            agent_name: 상담사 이름
+
+        Returns:
+            생성된 상담사의 DB ID 또는 None
+        """
+        if not self.db.is_initialized:
+            logger.warning("Database not initialized, skipping agent registration")
+            return None
+
+        try:
+            # 중복 체크
+            existing = await self.db.fetchrow(
+                """
+                SELECT agent_id FROM agents
+                WHERE agent_code = $1
+                """,
+                agent_code
+            )
+            if existing:
+                logger.warning(f"Agent with code {agent_code} already exists")
+                return None
+
+            agent_id = await self.db.fetchval(
+                """
+                INSERT INTO agents (agent_code, agent_name)
+                VALUES ($1, $2)
+                RETURNING agent_id
+                """,
+                agent_code, agent_name
+            )
+            logger.info(f"Registered agent: {agent_name} (code: {agent_code}, id: {agent_id})")
+            return agent_id
+        except Exception as e:
+            logger.error(f"Failed to register agent: {e}")
+            return None
+
+    async def find_agent(
+        self,
+        agent_code: str,
+        agent_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """상담사 코드와 이름으로 상담사를 조회합니다.
+
+        Args:
+            agent_code: 상담사 코드 (사번)
+            agent_name: 상담사 이름
+
+        Returns:
+            상담사 정보 딕셔너리 또는 None
+        """
+        if not self.db.is_initialized:
+            return None
+
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT agent_id, agent_code, agent_name, created_at
+                FROM agents
+                WHERE agent_code = $1 AND agent_name = $2
+                """,
+                agent_code, agent_name
+            )
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to find agent: {e}")
+            return None
+
+    async def get_agent_by_id(self, agent_id: int) -> Optional[Dict[str, Any]]:
+        """DB ID로 상담사를 조회합니다."""
+        if not self.db.is_initialized:
+            return None
+
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT agent_id, agent_code, agent_name, created_at
+                FROM agents
+                WHERE agent_id = $1
+                """,
+                agent_id
+            )
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Failed to get agent by id: {e}")
+            return None
+
+    async def get_all_agents(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """전체 상담사 목록을 조회합니다.
+
+        Args:
+            limit: 조회 개수 제한 (기본값: 100)
+
+        Returns:
+            상담사 정보 리스트
+        """
+        if not self.db.is_initialized:
+            logger.warning("Database not initialized, skipping agent list query")
+            return []
+
+        try:
+            rows = await self.db.fetch(
+                """
+                SELECT agent_id, agent_code, agent_name, created_at
+                FROM agents
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                if item.get('created_at'):
+                    item['created_at'] = str(item['created_at'])
+                result.append(item)
+            logger.info(f"Found {len(result)} agents")
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get all agents: {e}")
+            return []
+
+    async def get_agent_sessions(
+        self,
+        agent_id: int,
+        limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """상담사의 상담 세션 목록을 조회합니다.
+
+        Args:
+            agent_id: 상담사 DB ID
+            limit: 조회 개수 제한
+
+        Returns:
+            세션 목록
+        """
+        if not self.db.is_initialized:
+            return []
+
+        try:
+            # consultation_sessions 테이블의 agent_id는 문자열로 저장됨
+            rows = await self.db.fetch(
+                """
+                SELECT
+                    cs.session_id,
+                    cs.room_id,
+                    cs.customer_id,
+                    cs.agent_name,
+                    cs.channel,
+                    cs.started_at,
+                    cs.ended_at,
+                    cs.final_summary,
+                    cs.metadata,
+                    c.customer_name,
+                    c.phone_number,
+                    (SELECT COUNT(*) FROM consultation_transcripts ct WHERE ct.session_id = cs.session_id) as transcript_count,
+                    EXTRACT(EPOCH FROM (COALESCE(cs.ended_at, NOW()) - cs.started_at))::int as duration_seconds
+                FROM consultation_sessions cs
+                LEFT JOIN customers c ON cs.customer_id = c.customer_id
+                WHERE cs.agent_id = $1::text
+                ORDER BY cs.started_at DESC
+                LIMIT $2
+                """,
+                str(agent_id), limit
+            )
+            result = []
+            for row in rows:
+                item = dict(row)
+                # datetime/UUID 변환
+                for key in ['started_at', 'ended_at']:
+                    if item.get(key):
+                        item[key] = str(item[key])
+                if item.get('session_id'):
+                    item['session_id'] = str(item['session_id'])
+                if item.get('room_id'):
+                    item['room_id'] = str(item['room_id'])
+                result.append(item)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get agent sessions: {e}")
+            return []
+
+
+_agent_repo: Optional[AgentRepository] = None
+
+
+def get_agent_repository() -> AgentRepository:
+    """AgentRepository 싱글톤 인스턴스를 반환합니다."""
+    global _agent_repo
+    if _agent_repo is None:
+        _agent_repo = AgentRepository()
+    return _agent_repo

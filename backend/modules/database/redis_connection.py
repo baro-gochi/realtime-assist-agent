@@ -53,7 +53,7 @@ class RedisManager:
             bool: 초기화 성공 여부
         """
         if self._initialized:
-            logger.info("Redis already initialized")
+            logger.info("[Redis] 이미 초기화됨")
             return True
 
         try:
@@ -65,10 +65,10 @@ class RedisManager:
             # Test connection
             await self.client.ping()
             self._initialized = True
-            logger.info(f"Redis connection initialized: {self.redis_url}")
+            logger.info(f"[Redis] 연결 초기화 완료: {self.redis_url}")
             return True
         except Exception as e:
-            logger.error(f"Failed to initialize Redis: {e}")
+            logger.error(f"[Redis] 초기화 실패: {e}")
             self._initialized = False
             return False
 
@@ -78,7 +78,7 @@ class RedisManager:
             await self.client.close()
             self.client = None
             self._initialized = False
-            logger.info("Redis connection closed")
+            logger.info("[Redis] 연결 종료")
 
     async def ping(self) -> bool:
         """Redis 서버에 ping을 보냅니다.

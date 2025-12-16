@@ -26,6 +26,12 @@ from .database import (
     SystemLogRepository,
     CustomerRepository,
     DatabaseLogHandler,
+    # Consultation repositories
+    get_session_repository,
+    get_transcript_repository,
+    get_agent_result_repository,
+    # Agent repository
+    get_agent_repository,
 )
 
 
@@ -55,4 +61,10 @@ __all__ = [
     "SystemLogRepository",
     "CustomerRepository",
     "DatabaseLogHandler",
+    # Consultation repositories
+    "get_session_repository",
+    "get_transcript_repository",
+    "get_agent_result_repository",
+    # Agent repository
+    "get_agent_repository",
 ]

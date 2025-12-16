@@ -18,6 +18,41 @@ from .connection import get_db_manager
 
 logger = logging.getLogger(__name__)
 
+def _format_subscription_duration(start_date) -> Optional[str]:
+    """가입일로부터 사용 기간을 계산해 사람이 읽기 쉬운 문자열로 반환."""
+    if not start_date:
+        return None
+
+    try:
+        from datetime import date
+
+        # 입력 타입 보정
+        if isinstance(start_date, str):
+            start_date = datetime.fromisoformat(start_date).date()
+        elif isinstance(start_date, datetime):
+            start_date = start_date.date()
+        elif not isinstance(start_date, date):
+            return None
+
+        today = datetime.utcnow().date()
+        if start_date > today:
+            return "0일"
+
+        days = (today - start_date).days
+        years, remainder = divmod(days, 365)
+        months, _ = divmod(remainder, 30)
+
+        parts = []
+        if years:
+            parts.append(f"{years}년")
+        if months:
+            parts.append(f"{months}개월")
+
+        main = " ".join(parts) if parts else f"{days}일"
+        return f"{main} (총 {days}일)"
+    except Exception:
+        return None
+
 
 class RoomRepository:
     """룸 및 참가자 데이터 저장소."""
@@ -36,7 +71,7 @@ class RoomRepository:
             생성된 룸의 UUID 또는 None
         """
         if not self.db.is_initialized:
-            logger.warning("Database not initialized, skipping room creation")
+            logger.warning("[DB] 초기화 안됨, 룸 생성 스킵")
             return None
 
         try:
@@ -51,10 +86,10 @@ class RoomRepository:
                 """,
                 room_name, metadata_json
             )
-            logger.info(f"Created room '{room_name}' with id: {room_id}")
+            logger.info(f"[DB] 룸 생성: '{room_name}' (id: {room_id})")
             return room_id
         except Exception as e:
-            logger.error(f"Failed to create room '{room_name}': {e}")
+            logger.error(f"[DB] 룸 생성 실패 '{room_name}': {e}")
             return None
 
     async def end_room(self, room_id: UUID) -> bool:
@@ -78,10 +113,10 @@ class RoomRepository:
                 """,
                 room_id
             )
-            logger.info(f"Room {room_id} marked as ended")
+            logger.info(f"[DB] 룸 종료: {room_id}")
             return True
         except Exception as e:
-            logger.error(f"Failed to end room {room_id}: {e}")
+            logger.error(f"[DB] 룸 종료 실패 {room_id}: {e}")
             return False
 
     async def add_peer(
@@ -486,12 +521,15 @@ class CustomerRepository:
         Returns:
             고객 정보 딕셔너리 또는 None (DB 연결 안 됨 또는 조회 실패)
         """
+        logger.info(f"[find_customer] 시작 - name='{name}', phone='{phone_number}', db_initialized={self.db.is_initialized}")
+
         if not self.db.is_initialized:
-            logger.warning("Database not initialized, skipping customer lookup")
+            logger.warning("[find_customer] Database not initialized, skipping customer lookup")
             return None
 
         # 전화번호 정규화 (DB 형식: 010-XXXX-XXXX)
         normalized_phone = self._normalize_phone(phone_number)
+        logger.info(f"[find_customer] 정규화된 전화번호: '{normalized_phone}'")
 
         try:
             row = await self.db.fetchrow(
@@ -500,7 +538,7 @@ class CustomerRepository:
                     customer_id, customer_name, phone_number,
                     age, gender, residence,
                     membership_grade, current_plan, monthly_fee,
-                    contract_status, bundle_info
+                    contract_status, bundle_info, data_allowance, subscription_date
                 FROM customers
                 WHERE customer_name = $1 AND phone_number = $2
                 """,
@@ -508,7 +546,15 @@ class CustomerRepository:
             )
             if row:
                 logger.info(f"Found customer: {name} ({normalized_phone})")
-                return dict(row)
+                result = dict(row)
+                # subscription_date를 문자열로 변환 + 사용 기간 계산
+                subscription_date = result.get('subscription_date')
+                if subscription_date:
+                    result['subscription_date'] = str(subscription_date)
+                    duration = _format_subscription_duration(subscription_date)
+                    if duration:
+                        result['subscription_duration'] = duration
+                return result
             logger.info(f"Customer not found: {name} ({normalized_phone})")
             return None
         except Exception as e:
@@ -518,13 +564,13 @@ class CustomerRepository:
     async def get_consultation_history(
         self,
         customer_id: int,
-        limit: int = 5
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
-        """고객의 최근 상담 이력을 조회합니다.
+        """고객의 최근 상담 이력을 조회합니다 (consultation_sessions 테이블).
 
         Args:
             customer_id: 고객 ID
-            limit: 조회 개수 제한 (기본값: 5)
+            limit: 조회 개수 제한 (기본값: 10)
 
         Returns:
             상담 이력 리스트 (DB 연결 안 됨 시 빈 리스트)
@@ -536,10 +582,20 @@ class CustomerRepository:
         try:
             rows = await self.db.fetch(
                 """
-                SELECT consultation_date, consultation_type, detail
-                FROM consultation_history
-                WHERE customer_id = $1
-                ORDER BY consultation_date DESC
+                SELECT
+                    cs.session_id,
+                    cs.started_at,
+                    cs.ended_at,
+                    cs.consultation_type,
+                    cs.final_summary,
+                    cs.agent_id,
+                    cs.agent_name,
+                    cs.status,
+                    (SELECT COUNT(*) FROM consultation_transcripts ct WHERE ct.session_id = cs.session_id) as transcript_count
+                FROM consultation_sessions cs
+                WHERE cs.customer_id = $1
+                  AND cs.status = 'ended'
+                ORDER BY cs.started_at DESC
                 LIMIT $2
                 """,
                 customer_id, limit
@@ -547,9 +603,17 @@ class CustomerRepository:
             result = []
             for row in rows:
                 item = dict(row)
-                # consultation_date를 문자열로 변환
-                if item.get('consultation_date'):
-                    item['consultation_date'] = str(item['consultation_date'])
+                # 날짜를 문자열로 변환
+                if item.get('started_at'):
+                    # started_at/ended_at 모두 문자열화하여 WebSocket 브로드캐스트 시 직렬화 오류 방지
+                    started_str = item['started_at'].strftime('%Y-%m-%d %H:%M')
+                    item['consultation_date'] = started_str
+                    item['started_at'] = started_str
+                if item.get('ended_at'):
+                    item['ended_at'] = item['ended_at'].strftime('%Y-%m-%d %H:%M')
+                # session_id를 문자열로 변환
+                if item.get('session_id'):
+                    item['session_id'] = str(item['session_id'])
                 result.append(item)
             logger.info(f"Found {len(result)} consultation history for customer {customer_id}")
             return result

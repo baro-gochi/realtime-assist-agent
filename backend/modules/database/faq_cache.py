@@ -101,7 +101,7 @@ class FAQSemanticCache:
             # DB 연결 확인
             db = get_db_manager()
             if not db.is_initialized:
-                logger.error("Database not initialized for FAQ cache")
+                logger.error("[FAQ] DB 초기화 안됨, 캐시 불가")
                 return False
 
             # Embeddings 초기화
@@ -111,11 +111,11 @@ class FAQSemanticCache:
             await self._ensure_table_exists()
 
             self._initialized = True
-            logger.info("FAQ Semantic Cache initialized (pgvector)")
+            logger.info("[FAQ] 시맨틱 캐시 초기화 완료 (pgvector)")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to initialize FAQ cache: {e}")
+            logger.error(f"[FAQ] 캐시 초기화 실패: {e}")
             self._initialized = False
             return False
 
@@ -150,9 +150,9 @@ class FAQSemanticCache:
             """)
         except Exception as e:
             # ivfflat 인덱스 생성 실패 시 (데이터 부족 등) 무시
-            logger.debug(f"Index creation skipped: {e}")
+            logger.debug(f"[FAQ] 인덱스 생성 스킵: {e}")
 
-        logger.debug(f"Cache table ensured: {CACHE_TABLE}")
+        logger.debug(f"[FAQ] 캐시 테이블 확인 완료: {CACHE_TABLE}")
 
     async def _get_embedding(self, text: str) -> List[float]:
         """텍스트의 임베딩 벡터를 생성합니다."""
@@ -222,7 +222,7 @@ class FAQSemanticCache:
             # 유사도가 임계값 미만이면 캐시 미스
             if similarity < similarity_threshold:
                 logger.debug(
-                    f"Cache miss: similarity={similarity:.4f} < threshold={similarity_threshold}"
+                    f"[FAQ] 캐시 미스: 유사도={similarity:.4f} < 임계값={similarity_threshold}"
                 )
                 return None
 
@@ -241,9 +241,9 @@ class FAQSemanticCache:
             cached_query = row["query_text"]
 
             logger.info(
-                f"Cache hit: query='{query[:30]}...' "
-                f"cached_query='{cached_query[:30]}...' "
-                f"similarity={similarity:.4f}"
+                f"[FAQ] 캐시 히트: 쿼리='{query[:30]}...' "
+                f"캐시된='{cached_query[:30]}...' "
+                f"유사도={similarity:.4f}"
             )
 
             return FAQCacheResult(
@@ -256,7 +256,7 @@ class FAQSemanticCache:
             )
 
         except Exception as e:
-            logger.error(f"Cache search failed: {e}")
+            logger.error(f"[FAQ] 캐시 검색 실패: {e}")
             return None
 
     async def cache_result(
@@ -302,11 +302,11 @@ class FAQSemanticCache:
                 json.dumps(faqs, ensure_ascii=False),
             )
 
-            logger.debug(f"Cached FAQ result: query='{query[:50]}...', faqs={len(faqs)}")
+            logger.debug(f"[FAQ] 캐시 저장: 쿼리='{query[:50]}...', 결과={len(faqs)}개")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to cache result: {e}")
+            logger.error(f"[FAQ] 캐시 저장 실패: {e}")
             return False
 
     async def search_with_cache(
@@ -342,7 +342,7 @@ class FAQSemanticCache:
             try:
                 faqs = await fallback_search_func(query, category)
             except Exception as e:
-                logger.error(f"Fallback search failed: {e}")
+                logger.error(f"[FAQ] 폴백 검색 실패: {e}")
 
         search_time_ms = (time.time() - start_time) * 1000
 
@@ -384,11 +384,11 @@ class FAQSemanticCache:
 
             # 결과에서 삭제된 행 수 추출
             deleted = int(result.split()[-1]) if result else 0
-            logger.info(f"Cache cleared: {deleted} entries removed")
+            logger.info(f"[FAQ] 캐시 삭제 완료: {deleted}개 항목")
             return deleted
 
         except Exception as e:
-            logger.error(f"Failed to clear cache: {e}")
+            logger.error(f"[FAQ] 캐시 삭제 실패: {e}")
             return 0
 
     async def get_cache_stats(self) -> Dict[str, Any]:
@@ -424,7 +424,7 @@ class FAQSemanticCache:
             }
 
         except Exception as e:
-            logger.error(f"Failed to get cache stats: {e}")
+            logger.error(f"[FAQ] 캐시 통계 조회 실패: {e}")
             return {"initialized": True, "error": str(e)}
 
 

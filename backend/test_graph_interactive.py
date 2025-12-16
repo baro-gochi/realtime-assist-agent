@@ -38,7 +38,10 @@ load_dotenv(Path(__file__).parent / "config" / ".env")
 
 from modules.agent.graph import create_agent_graph, ContextSchema
 from modules.agent.cache import setup_global_llm_cache, get_cache_stats
+from modules.agent.manager import RoomAgent
 from modules.database import get_db_manager
+from modules.database.repository import CustomerRepository
+from modules.database.consultation_repository import AgentRepository, get_agent_repository
 from langchain_openai import ChatOpenAI
 
 
@@ -242,6 +245,7 @@ class GraphTester:
             "membership_grade": "Gold",
             "current_plan": "인기LTE 데이터ON - 비디오 플러스 69,000원",
             "monthly_fee": 69000,
+            "current_data_gb": 11,  # 현재 요금제 데이터량 (GB), 0=무제한
             "contract_status": "약정 4개월 남음",
             "bundle_info": "없음 (단독 회선)",
         }
@@ -632,6 +636,145 @@ def get_default_output_path() -> str:
     return str(test_dir / f"result_{timestamp}.txt")
 
 
+class DBScenarioTester:
+    """DB 저장 기능이 있는 시나리오 테스터 (RoomAgent 사용)"""
+
+    def __init__(
+        self,
+        agent_code: str = "A001",
+        agent_name: str = "김상담",
+        customer_name: str = "윤지훈",
+        customer_phone: str = "010-2222-3333"
+    ):
+        self.agent_code = agent_code
+        self.agent_name = agent_name
+        self.customer_name = customer_name
+        self.customer_phone = customer_phone
+        self.room_agent: Optional[RoomAgent] = None
+        self._db_initialized = False
+
+    async def initialize(self):
+        """DB 및 에이전트 초기화"""
+        print("=" * 60)
+        print("DB 시나리오 테스터 초기화")
+        print("=" * 60)
+
+        # DB 초기화
+        db = get_db_manager()
+        await db.initialize()
+        self._db_initialized = True
+        print("DB 연결 완료")
+
+        # 상담사 조회
+        agent_repo = AgentRepository()
+        agent_info = await agent_repo.find_agent(self.agent_code, self.agent_name)
+        if not agent_info:
+            print(f"상담사를 찾을 수 없습니다: {self.agent_code} / {self.agent_name}")
+            return False
+        print(f"상담사 확인: {agent_info['agent_name']} ({agent_info['agent_code']})")
+
+        # 고객 조회
+        customer_repo = CustomerRepository()
+        customer_info = await customer_repo.find_customer(self.customer_name, self.customer_phone)
+        if not customer_info:
+            print(f"고객을 찾을 수 없습니다: {self.customer_name} / {self.customer_phone}")
+            return False
+        print(f"고객 확인: {customer_info['customer_name']} ({customer_info['phone_number']})")
+
+        # 룸 생성 (테스트용 임의 룸)
+        room_name = f"test_scenario_{datetime.now().strftime('%H%M%S')}"
+
+        # RoomAgent 생성
+        self.room_agent = RoomAgent(room_name, save_to_db=True)
+        print(f"RoomAgent 생성: {room_name}")
+
+        # 고객 컨텍스트 설정
+        consultation_history = await customer_repo.get_consultation_history(customer_info['customer_id'])
+        self.room_agent.set_customer_context(customer_info, consultation_history)
+        print(f"고객 컨텍스트 설정 완료 (이력 {len(consultation_history)}건)")
+
+        # 세션 시작
+        session_id = await self.room_agent.start_session(
+            agent_name=self.agent_name,
+            customer_id=customer_info['customer_id'],
+            agent_id=str(agent_info['agent_id'])
+        )
+        if session_id:
+            print(f"세션 시작: {session_id}")
+        else:
+            print("세션 시작 실패!")
+            return False
+
+        print("=" * 60)
+        return True
+
+    async def run_scenario(self, scenario: List[Dict[str, str]], auto_delay: bool = True):
+        """시나리오 실행 및 DB 저장"""
+        if not self.room_agent:
+            print("초기화가 필요합니다. initialize()를 먼저 호출하세요.")
+            return
+
+        print(f"\n시나리오 실행 시작 (총 {len(scenario)}개 발화)")
+        print("-" * 60)
+
+        for i, utterance in enumerate(scenario):
+            speaker = utterance["speaker"]
+            text = utterance["text"]
+
+            # 발화자 매핑
+            if speaker in ["상담사", "agent"]:
+                speaker_type = "agent"
+                speaker_name = self.agent_name
+                is_customer = False
+            else:
+                speaker_type = "customer"
+                speaker_name = self.customer_name
+                is_customer = True
+
+            print(f"\n[{i+1}/{len(scenario)}] {speaker_name}: {text}")
+
+            # 딜레이
+            if auto_delay:
+                delay = calculate_delay(text)
+                print(f"  (대기 {delay}초...)")
+                await asyncio.sleep(delay)
+
+            # RoomAgent로 전사 처리 (그래프 실행 + DB 저장)
+            await self.room_agent.on_new_transcript(
+                speaker_id=f"test_{speaker_type}",
+                speaker_name=speaker_name,
+                text=text,
+                
+                is_customer=is_customer
+            )
+
+            # 결과 출력
+            state = self.room_agent.state
+            if state.get("summary_result"):
+                sr = state["summary_result"]
+                print(f"  [요약] {sr.get('summary', '-')}")
+            if state.get("intent_result"):
+                ir = state["intent_result"]
+                print(f"  [의도] {ir.get('intent_label', '-')} ({ir.get('intent_confidence', 0):.0%})")
+            if state.get("sentiment_result"):
+                sent = state["sentiment_result"]
+                print(f"  [감정] {sent.get('sentiment_label', '-')}")
+
+            print("-" * 60)
+
+        print("\n시나리오 완료!")
+
+        # 세션 종료 및 최종 저장
+        print("\n세션 종료 중...")
+        success = await self.room_agent.end_session()
+        if success:
+            print(f"세션 저장 완료! (session_id: {self.room_agent.session_id})")
+        else:
+            print("세션 저장 실패")
+
+        return success
+
+
 SCENARIO_MAP = {
     "default": DEFAULT_SCENARIO,
     "billing": DEFAULT_SCENARIO,  # 요금 관련 (기본 시나리오)
@@ -653,9 +796,46 @@ async def main():
     parser.add_argument("--output", "-o", type=str, help="결과 저장 파일 경로 (미지정시 test/result_YYYYMMDD_HHMMSS.txt)")
     parser.add_argument("--no-output", action="store_true", help="결과 파일 저장 안함")
 
+    # DB 저장 관련 옵션
+    parser.add_argument("--save-db", action="store_true", help="시나리오 결과를 DB에 저장")
+    parser.add_argument("--agent-code", type=str, default="A001", help="상담사 코드 (기본: A001)")
+    parser.add_argument("--agent-name", type=str, default="김상담", help="상담사 이름 (기본: 김상담)")
+    parser.add_argument("--customer-name", type=str, default="윤지훈", help="고객 이름 (기본: 윤지훈)")
+    parser.add_argument("--customer-phone", type=str, default="010-2222-3333", help="고객 전화번호 (기본: 010-2222-3333)")
+
     args = parser.parse_args()
 
-    # 출력 파일 경로 결정
+    # 시나리오 로드
+    scenario = SCENARIO_MAP.get(args.scenario_type, DEFAULT_SCENARIO)
+    if args.file:
+        scenario_path = Path(args.file)
+        if scenario_path.exists():
+            with open(scenario_path, "r", encoding="utf-8") as f:
+                scenario = json.load(f)
+            print(f"시나리오 파일 로드: {args.file}")
+        else:
+            print(f"파일을 찾을 수 없습니다: {args.file}")
+
+    # DB 저장 모드
+    if args.save_db:
+        print("\n*** DB 저장 모드 ***")
+        print(f"상담사: {args.agent_name} ({args.agent_code})")
+        print(f"고객: {args.customer_name} ({args.customer_phone})\n")
+
+        tester = DBScenarioTester(
+            agent_code=args.agent_code,
+            agent_name=args.agent_name,
+            customer_name=args.customer_name,
+            customer_phone=args.customer_phone
+        )
+
+        if await tester.initialize():
+            await tester.run_scenario(scenario, auto_delay=not args.no_delay)
+        else:
+            print("초기화 실패. DB와 상담사/고객 정보를 확인하세요.")
+        return
+
+    # 기존 모드 (DB 저장 없음)
     output_file = None
     if not args.no_output:
         output_file = args.output if args.output else get_default_output_path()
@@ -664,20 +844,7 @@ async def main():
 
     if args.scenario:
         # 시나리오 모드
-        scenario = SCENARIO_MAP.get(args.scenario_type, DEFAULT_SCENARIO)
         print(f"시나리오 타입: {args.scenario_type}")
-
-        if args.file:
-            # 파일에서 시나리오 로드 (파일이 지정되면 타입보다 우선)
-            scenario_path = Path(args.file)
-            if scenario_path.exists():
-                with open(scenario_path, "r", encoding="utf-8") as f:
-                    scenario = json.load(f)
-                print(f"시나리오 파일 로드: {args.file}")
-            else:
-                print(f"파일을 찾을 수 없습니다: {args.file}")
-                print(f"'{args.scenario_type}' 시나리오를 사용합니다.")
-
         await tester.run_scenario(scenario, auto_delay=not args.no_delay)
     else:
         # 대화형 모드

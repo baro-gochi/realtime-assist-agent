@@ -385,7 +385,7 @@ class PeerConnectionManager:
         offer: dict,
         other_peers_in_room: list
     ) -> dict:
-        logger.info(f"handle_offer: peer={peer_id[:8]}, room={room_name}")
+        logger.info(f"[WebRTC] offer 처리: peer={peer_id[:8]}, room={room_name}")
         """WebRTC offer를 처리하고 answer를 생성합니다.
 
         클라이언트로부터 받은 WebRTC offer를 처리하여 피어 연결을 설정하고,

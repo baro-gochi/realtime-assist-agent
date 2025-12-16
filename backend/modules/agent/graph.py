@@ -105,7 +105,7 @@ RISK_SCHEMA = {
         "risk_flags": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "감지된 리스크 코드 리스트 (예: 'security_concern', 'cancellation_risk')"
+            "description": "감지된 리스크 코드 리스트 (예: '보안 우려', '해지 위험')"
         },
         "risk_explanation": {
             "type": "string",
@@ -289,7 +289,7 @@ def _should_trigger_rag(
 
     if intent_confidence < RAG_CONFIDENCE_THRESHOLD:
         logger.info(
-            f"_should_trigger_rag: 신뢰도 낮음 ({intent_confidence:.2f} < {RAG_CONFIDENCE_THRESHOLD}), RAG 스킵"
+            f"[RAG] 신뢰도 낮음 ({intent_confidence:.2f} < {RAG_CONFIDENCE_THRESHOLD}), RAG 스킵"
         )
         return False
 
@@ -304,24 +304,38 @@ def _should_trigger_rag(
 SENTIMENT_SYSTEM_PROMPT = """당신은 KT 고객센터 실시간 상담 지원 AI입니다.
 
 ## 역할
-고객의 발화를 분석하여 **감정 상태**를 파악합니다.
+고객의 발화를 분석하여 **감정 상태**를 정확히 파악합니다.
 
 ## 작업 지시사항
-1. 최근 고객 발화에서 대표 감정을 파악합니다
-2. 감정의 강도와 판단 근거를 제시합니다
-3. 상담사가 고객 응대 시 참고할 수 있도록 분석합니다
+1. 최근 고객 발화의 어조, 단어 선택, 맥락을 종합 분석합니다
+2. 감정의 강도(0~1)와 판단 근거를 명확히 제시합니다
+3. 단순 문의는 '중립'으로, 감정 표현이 있을 때만 해당 감정으로 분류합니다
 
 ## 출력 형식
-- sentiment_label: 감정 라벨 ('불안', '혼란', '분노', '짜증', '안정', '만족', '무난')
+- sentiment_label: 감정 라벨 (아래 목록 중 하나만 선택)
 - sentiment_score: 0~1 사이 감정 강도
 - sentiment_explanation: 근거 한두 문장
 
-## 감정 판단 기준
-- 불안: 해킹, 개인정보 유출, 요금 폭탄 걱정
-- 혼란: 서비스 이해 부족, 복잡한 안내에 대한 어려움
-- 분노: 반복 문의, 서비스 불만, 불공정 처우
-- 짜증: 대기시간, 절차 복잡, 해결 지연
-- 안정/만족: 문제 해결, 명확한 안내 후"""
+## 감정 라벨 목록 (정확히 이 중 하나만 사용)
+### 부정적 감정
+- 분노: 강한 불만 표출, 욕설/비난, "도대체", "왜 맨날" 등
+- 짜증: 반복 문의 불만, "또요?", "아 진짜", 짧고 퉁명한 답변
+- 불안: 걱정 표현, "혹시~인가요?", 해킹/요금폭탄 우려
+- 실망: 기대 미충족, "그것밖에 안되나요", 한숨 섞인 어조
+- 당황: 예상치 못한 상황, "네?", "갑자기요?"
+
+### 긍정적 감정
+- 만족: 감사 표현, "고마워요", "다행이네요"
+- 안심: 문제 해결 후 안도, "아 그렇구나", "걱정했는데"
+
+### 중립적 감정
+- 중립: 단순 정보 요청, 감정 표현 없음, 사무적 어조
+- 차분: 침착한 설명, 논리적 질문, 협조적 태도
+
+## 판단 시 주의사항
+- 단순 질문("요금제 알려주세요")은 '중립'으로 분류
+- 감정 단어가 없어도 문맥상 부정적이면 해당 감정 선택
+- 확실하지 않으면 '중립' 선택 (혼란을 기본값으로 쓰지 말 것)"""
 
 DRAFT_REPLY_SYSTEM_PROMPT = """당신은 KT 고객센터 실시간 상담 지원 AI입니다.
 
@@ -350,17 +364,17 @@ RISK_SYSTEM_PROMPT = """당신은 KT 고객센터 실시간 상담 지원 AI입�
 
 ## 작업 지시사항
 1. 최근 대화에서 아래 위험 요소가 있는지 판단합니다
-2. 해당되는 위험 코드만 리스트에 포함합니다
+2. 해당되는 위험 플래그(한글)만 리스트에 포함합니다
 3. 위험 요소가 없으면 빈 리스트를 반환합니다
 
-## 위험 플래그 (risk_flags)
-- 'security_concern': 해킹/사기/개인정보 유출 의심
-- 'cancellation_risk': 해지/타사 이동/강한 불만 표출
-- 'refund_demand': 환불/보상 요구
-- 'complaint_escalation': 민원/신고 언급, 상담에 대한 강한 불만
+## 위험 플래그 (risk_flags) - 반드시 아래 한글 값만 사용
+- '보안 우려': 해킹/사기/개인정보 유출 의심
+- '해지 위험': 해지/타사 이동/강한 불만 표출
+- '환불 요청': 환불/보상 요구
+- '민원 확대': 민원/신고 언급, 상담에 대한 강한 불만
 
 ## 출력 형식
-- risk_flags: 감지된 리스크 코드 리스트 (없으면 빈 리스트 [])
+- risk_flags: 감지된 위험 플래그 리스트 (없으면 빈 리스트 [])
 - risk_explanation: 왜 위험 요소로 판단했는지 한두 문장 (없으면 "위험 요소 없음")
 
 ## 판단 기준
@@ -438,6 +452,8 @@ class ConversationState(MessagesState):
     last_risk_index: int
     last_rag_index: int
     last_faq_index: int  # 마지막으로 FAQ 검색한 대화 인덱스
+    last_rag_intent: str  # 마지막으로 RAG 검색한 의도 라벨 (중복 방지)
+    last_faq_query: str  # 마지막으로 FAQ 검색한 쿼리 (중복 방지)
 
 
 # ---------- 공통 유틸 ----------
@@ -464,7 +480,7 @@ def with_timing(
         except Exception:
             # 실패 시에도 시간 기록을 남기기 위해 다시 raise 전에 메트릭 기록
             elapsed_ms = int((time.perf_counter() - start) * 1000)
-            logger.exception(f"[{node_name}] node failed after {elapsed_ms} ms")
+            logger.exception(f"[에이전트] {node_name} 노드 실패: {elapsed_ms}ms")
             raise
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -473,7 +489,7 @@ def with_timing(
             "elapsed_ms": elapsed_ms,
             "timestamp": int(time.time() * 1000),
         }
-        logger.info(f"TIMING [{node_name}] {elapsed_ms}ms")
+        logger.info(f"[에이전트] {node_name} 실행: {elapsed_ms}ms")
 
         if isinstance(result, dict):
             # 노드별 메트릭 필드를 포함시켜 stream_mode='updates'에서도 노드 이름과 함께 전달
@@ -489,14 +505,14 @@ def create_summarize_node(llm: BaseChatModel):
         CONVERSATION_SUMMARY_SCHEMA,
         method="json_schema",
     )
-    logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (요약)")
+    # logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (요약)")
 
 
     async def summarize_node(
         state: ConversationState,
         runtime: Runtime[ContextSchema]
     ) -> Dict[str, Any]:
-        logger.info("summarize_node started (structured output mode)")
+        logger.info("[에이전트] 요약 노드 시작")
         conversation_history = state.get("conversation_history", [])
         last_summarized_index = state.get("last_summarized_index", 0)
         current_summary = state.get("current_summary", "")
@@ -504,7 +520,7 @@ def create_summarize_node(llm: BaseChatModel):
 
         total_count = len(conversation_history)
         if last_summarized_index >= total_count:
-            logger.info("No new transcripts, returning existing summary")
+            logger.info("[에이전트] 새로운 대화 없음, 기존 요약 유지")
             return {
                 "current_summary": current_summary,
                 "last_summarized_index": last_summarized_index
@@ -544,13 +560,13 @@ def create_summarize_node(llm: BaseChatModel):
             HumanMessage(content=user_content),
         ]
 
-        logger.info("Calling structured LLM for summary...")
+        logger.info("[에이전트] 요약 LLM 호출 중...")
         try:
             result: Dict[str, Any] = await structured_llm.ainvoke(messages)
             latest_summary = SummaryResult(**result)
             summary_json = latest_summary.model_dump_json(ensure_ascii=False)
         except Exception as e:
-            logger.error(f"Structured LLM call failed in summarize_node: {e}")
+            logger.error(f"[에이전트] 요약 노드 LLM 호출 실패: {e}")
             return {
                 "summary_result": state.get("summary_result", {}),
                 "current_summary": current_summary,
@@ -599,7 +615,7 @@ def create_intent_node(llm: BaseChatModel):
         INTENT_SCHEMA,
         method="json_schema",
     )
-    logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (의도파악)")
+    # logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (의도파악)")
 
     async def intent_node(
         state: ConversationState,
@@ -621,7 +637,7 @@ def create_intent_node(llm: BaseChatModel):
 
         # 고객 발화가 없으면 의도 분석 스킵
         if not has_new_customer_turn:
-            logger.info("intent_node: 새로운 고객 발화 없음, 의도 분석 스킵")
+            logger.info("[에이전트] 새로운 고객 발화 없음, 의도 분석 스킵")
             return {
                 "last_intent_index": len(conversation_history)
             }
@@ -650,7 +666,7 @@ def create_intent_node(llm: BaseChatModel):
                 "last_intent_index": len(conversation_history)
             }
         except Exception as e:
-            logger.error(f"intent_node LLM call failed: {e}")
+            logger.error(f"[에이전트] 의도 노드 LLM 호출 실패: {e}")
             return {"last_intent_index": len(conversation_history)}
 
     return intent_node
@@ -663,7 +679,7 @@ def create_sentiment_node(llm: BaseChatModel):
         SENTIMENT_SCHEMA,
         method="json_schema",
     )
-    logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (감정분석)")
+    # logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (감정분석)")
 
     async def sentiment_node(
         state: ConversationState,
@@ -680,7 +696,7 @@ def create_sentiment_node(llm: BaseChatModel):
         )
 
         if not has_new_customer_turn:
-            logger.info("sentiment_node: 새로운 고객 발화 없음, 감정 분석 스킵")
+            logger.info("[에이전트] 새로운 고객 발화 없음, 감정 분석 스킵")
             return {"last_sentiment_index": len(conversation_history)}
 
         # 고객 발화 위주로 직전 몇 개 사용
@@ -711,7 +727,7 @@ def create_sentiment_node(llm: BaseChatModel):
                 "last_sentiment_index": len(conversation_history)
             }
         except Exception as e:
-            logger.error(f"sentiment_node LLM call failed: {e}")
+            logger.error(f"[에이전트] 감정 노드 LLM 호출 실패: {e}")
             return {"last_sentiment_index": len(conversation_history)}
 
     return sentiment_node
@@ -724,7 +740,7 @@ def create_draft_reply_node(llm: BaseChatModel):
         DRAFT_REPLY_SCHEMA,
         method="json_schema",
     )
-    logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (응답 초안 추천)")
+    # logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (응답 초안 추천)")
 
     async def draft_reply_node(
         state: ConversationState,
@@ -741,7 +757,7 @@ def create_draft_reply_node(llm: BaseChatModel):
         )
 
         if not has_new_customer_turn:
-            logger.info("draft_reply_node: 새로운 고객 발화 없음, 응답 초안 생성 스킵")
+            logger.info("[에이전트] 새로운 고객 발화 없음, 응답 초안 생성 스킵")
             return {"last_draft_index": len(conversation_history)}
 
         recent = conversation_history[-8:]
@@ -776,7 +792,7 @@ def create_draft_reply_node(llm: BaseChatModel):
                 "last_draft_index": len(conversation_history)
             }
         except Exception as e:
-            logger.error(f"draft_reply_node LLM call failed: {e}")
+            logger.error(f"[에이전트] 응답 초안 노드 LLM 호출 실패: {e}")
             return {"last_draft_index": len(conversation_history)}
 
     return draft_reply_node
@@ -789,7 +805,7 @@ def create_risk_node(llm: BaseChatModel):
         RISK_SCHEMA,
         method="json_schema",
     )
-    logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (위험 대응 경고)")
+    # logger.info("JSON Schema 구조화 출력용 Structured LLM 생성 완료 (위험 대응 경고)")
 
     async def risk_node(
         state: ConversationState,
@@ -806,7 +822,7 @@ def create_risk_node(llm: BaseChatModel):
         )
 
         if not has_new_customer_turn:
-            logger.info("risk_node: 새로운 고객 발화 없음, 위험 감지 스킵")
+            logger.info("[에이전트] 새로운 고객 발화 없음, 위험 감지 스킵")
             return {"last_risk_index": len(conversation_history)}
 
         recent = conversation_history[-12:]
@@ -832,7 +848,7 @@ def create_risk_node(llm: BaseChatModel):
                 "last_risk_index": len(conversation_history)
             }
         except Exception as e:
-            logger.error(f"risk_node LLM call failed: {e}")
+            logger.error(f"[에이전트] 위험 감지 노드 LLM 호출 실패: {e}")
             return {"last_risk_index": len(conversation_history)}
 
     return risk_node
@@ -855,19 +871,33 @@ def create_rag_policy_node():
 
         intent_result의 intent_label을 사용하여 관련 정책을 검색합니다.
         고객 정보(customer_info)를 활용하여 맞춤형 추천을 제공합니다.
+        동일한 의도가 반복되면 중복 검색을 방지합니다.
         """
         conversation_history = state.get("conversation_history", [])
         intent_result = state.get("intent_result", {})
         customer_info = state.get("customer_info", {})
         last_rag_index = state.get("last_rag_index", 0)
+        last_rag_intent = state.get("last_rag_intent", "")
 
         # 의도 분석 결과가 없으면 스킵
         if not intent_result:
-            logger.info("rag_policy_node: no intent_result, skipping")
+            logger.info("[RAG] 의도 결과 없음, 스킵")
             return {"last_rag_index": len(conversation_history)}
 
         intent_label = intent_result.get("intent_label", "")
         intent_confidence = intent_result.get("intent_confidence", 0.0)
+
+        # 이전과 동일한 의도면 중복 검색 스킵
+        if intent_label and intent_label == last_rag_intent:
+            logger.info(f"[RAG] 동일 의도 '{intent_label}', 중복 검색 스킵")
+            return {
+                "rag_policy_result": {
+                    "skipped": True,
+                    "skip_reason": "동일한 의도로 이미 검색된 결과가 있습니다.",
+                    "intent_label": intent_label
+                },
+                "last_rag_index": len(conversation_history)
+            }
 
         # 최근 고객 발화 추출
         recent_customer_utts = []
@@ -882,7 +912,7 @@ def create_rag_policy_node():
 
         # RAG 트리거 여부 확인 (신뢰도도 함께 전달)
         if not _should_trigger_rag(intent_label, customer_query, intent_confidence):
-            logger.info(f"rag_policy_node: RAG not needed for intent='{intent_label}' (confidence={intent_confidence:.2f})")
+            logger.info(f"[RAG] 검색 불필요: 의도='{intent_label}' (신뢰도={intent_confidence:.2f})")
             return {
                 "rag_policy_result": {
                     "skipped": True,
@@ -892,7 +922,7 @@ def create_rag_policy_node():
                 "last_rag_index": len(conversation_history)
             }
 
-        logger.info(f"rag_policy_node: searching for intent='{intent_label}'")
+        logger.info(f"[RAG] 정책 검색 중: 의도='{intent_label}'")
 
         try:
             rag_result = await rag_policy_search(
@@ -904,14 +934,15 @@ def create_rag_policy_node():
             result_dict = rag_result.to_dict()
             result_dict["skipped"] = False
 
-            logger.info(f"rag_policy_node: found {len(rag_result.recommendations)} recommendations")
+            logger.info(f"[RAG] 검색 완료: {len(rag_result.recommendations)}개 추천")
 
             return {
                 "rag_policy_result": result_dict,
-                "last_rag_index": len(conversation_history)
+                "last_rag_index": len(conversation_history),
+                "last_rag_intent": intent_label  # 중복 방지를 위해 의도 저장
             }
         except Exception as e:
-            logger.error(f"rag_policy_node search failed: {e}")
+            logger.error(f"[RAG] 정책 검색 실패: {e}")
             return {
                 "rag_policy_result": {
                     "skipped": False,
@@ -952,38 +983,61 @@ FAQ_TRIGGERING_KEYWORDS = [
 ]
 
 
-def _should_trigger_faq(intent_label: str, customer_query: str) -> tuple[bool, str | None]:
-    """FAQ 검색이 필요한지 판단하고 카테고리를 반환합니다.
+def _is_similar_query(query1: str, query2: str, threshold: float = 0.7) -> bool:
+    """두 쿼리가 유사한지 간단히 비교합니다 (키워드 기반).
+
+    Args:
+        query1: 첫 번째 쿼리
+        query2: 두 번째 쿼리
+        threshold: 유사도 임계값 (0~1)
 
     Returns:
-        (should_search, category): 검색 여부와 FAQ 카테고리
+        bool: 유사 여부
     """
-    # 의도 기반 카테고리 매핑
-    for intent_key, category in FAQ_INTENT_CATEGORY_MAP.items():
-        if intent_key in intent_label:
-            return True, category
+    if not query1 or not query2:
+        return False
 
-    # 키워드 기반 감지
-    combined_text = f"{intent_label} {customer_query}".lower()
+    # 키워드 추출 (2자 이상)
+    words1 = set(w for w in query1.lower().split() if len(w) >= 2)
+    words2 = set(w for w in query2.lower().split() if len(w) >= 2)
+
+    if not words1 or not words2:
+        return query1.strip() == query2.strip()
+
+    # Jaccard 유사도
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+
+    return (intersection / union) >= threshold if union > 0 else False
+
+
+def _should_trigger_faq_by_text(customer_query: str) -> bool:
+    """고객 발화 텍스트만으로 FAQ 검색이 필요한지 판단합니다.
+
+    Args:
+        customer_query: 고객 발화 텍스트
+
+    Returns:
+        bool: FAQ 검색 필요 여부
+    """
+    if not customer_query or len(customer_query.strip()) < 3:
+        return False
+
+    query_lower = customer_query.lower()
+
     for keyword in FAQ_TRIGGERING_KEYWORDS:
-        if keyword.lower() in combined_text:
-            # 키워드로 카테고리 추정
-            if any(k in combined_text for k in ["vip", "vvip", "등급", "포인트"]):
-                return True, "등급"
-            elif any(k in combined_text for k in ["영화", "할인", "스타벅스", "혜택", "제휴"]):
-                return True, "멤버십 혜택"
-            elif any(k in combined_text for k in ["카드", "발급", "가입"]):
-                return True, "가입/카드발급"
-            return True, None  # 카테고리 미지정
+        if keyword.lower() in query_lower:
+            return True
 
-    return False, None
+    return False
 
 
 def create_faq_search_node():
     """FAQ Semantic Cache 검색 노드를 생성합니다.
 
-    intent 노드 이후 rag_policy와 병렬로 실행되며,
-    의도 기반으로 FAQ semantic cache를 검색합니다.
+    STT 응답 직후 바로 실행되며 (START에서 분기),
+    고객 발화 텍스트 기반으로 FAQ semantic cache를 검색합니다.
+    intent 분석과 독립적으로 병렬 실행됩니다.
     """
     from modules.database import get_faq_service
 
@@ -993,19 +1047,19 @@ def create_faq_search_node():
     ) -> Dict[str, Any]:
         """FAQ semantic cache 검색 노드.
 
-        intent_result를 기반으로 FAQ를 검색합니다.
-        rag_policy와 병렬로 실행되어 빠른 응답을 제공합니다.
+        STT 응답 직후 바로 실행됩니다 (intent 분석과 병렬).
+        고객 발화 텍스트를 기반으로 FAQ를 검색합니다.
+        유사한 쿼리가 반복되면 중복 검색을 방지합니다.
         """
         conversation_history = state.get("conversation_history", [])
-        intent_result = state.get("intent_result", {})
         last_faq_index = state.get("last_faq_index", 0)
+        last_faq_query = state.get("last_faq_query", "")
 
-        # 의도 분석 결과가 없으면 스킵
-        if not intent_result:
-            logger.info("faq_search_node: no intent_result, skipping")
+        # 새로운 고객 발화가 없으면 스킵
+        has_new_customer = _has_customer_turn_since(conversation_history, last_faq_index)
+        if not has_new_customer:
+            logger.info("[FAQ] 새로운 고객 발화 없음, 스킵")
             return {"last_faq_index": len(conversation_history)}
-
-        intent_label = intent_result.get("intent_label", "")
 
         # 최근 고객 발화 추출
         recent_customer_utts = []
@@ -1018,31 +1072,46 @@ def create_faq_search_node():
                     break
         customer_query = " ".join(recent_customer_utts)
 
-        # FAQ 트리거 여부 및 카테고리 확인
-        should_search, category = _should_trigger_faq(intent_label, customer_query)
+        if not customer_query.strip():
+            logger.info("[FAQ] 고객 발화 텍스트 없음, 스킵")
+            return {"last_faq_index": len(conversation_history)}
 
-        if not should_search:
-            logger.info(f"faq_search_node: FAQ not needed for intent='{intent_label}'")
+        # 이전과 유사한 쿼리면 중복 검색 스킵
+        if last_faq_query and _is_similar_query(customer_query, last_faq_query):
+            logger.info(f"[FAQ] 유사 쿼리 중복, 스킵: '{customer_query[:30]}...'")
             return {
                 "faq_result": {
                     "skipped": True,
-                    "skip_reason": "FAQ 검색이 필요하지 않은 의도입니다.",
-                    "intent_label": intent_label
+                    "skip_reason": "유사한 질문으로 이미 검색된 결과가 있습니다.",
+                    "query": customer_query
                 },
                 "last_faq_index": len(conversation_history)
             }
 
-        logger.info(f"faq_search_node: searching FAQ for intent='{intent_label}', category='{category}'")
+        # FAQ 트리거 여부 확인 (발화 텍스트 기반 키워드 검사)
+        should_search = _should_trigger_faq_by_text(customer_query)
+
+        if not should_search:
+            logger.info(f"[FAQ] 검색 불필요: 쿼리='{customer_query[:30]}...'")
+            return {
+                "faq_result": {
+                    "skipped": True,
+                    "skip_reason": "FAQ 검색이 필요하지 않은 발화입니다.",
+                    "query": customer_query
+                },
+                "last_faq_index": len(conversation_history)
+            }
+
+        logger.info(f"[FAQ] 검색 중: 쿼리='{customer_query[:50]}...'")
 
         try:
             faq_service = get_faq_service()
             if not faq_service.is_initialized:
                 await faq_service.initialize()
 
-            # Semantic cache 검색
+            # Semantic cache 검색 (질문 내용 유사도 기반)
             result = await faq_service.semantic_search(
                 query=customer_query,
-                category=category,
                 limit=3,
                 use_cache=True,
                 distance_threshold=0.45,
@@ -1050,9 +1119,7 @@ def create_faq_search_node():
 
             faq_result = {
                 "skipped": False,
-                "intent_label": intent_label,
                 "query": customer_query,
-                "category": category,
                 "cache_hit": result.cache_hit,
                 "similarity_score": result.similarity_score,
                 "cached_query": result.cached_query,
@@ -1061,23 +1128,22 @@ def create_faq_search_node():
             }
 
             logger.info(
-                f"faq_search_node: found {len(result.faqs)} FAQs "
-                f"(cache_hit={result.cache_hit}, similarity={result.similarity_score:.3f})"
+                f"[FAQ] 검색 완료: {len(result.faqs)}개 "
+                f"(캐시={result.cache_hit}, 유사도={result.similarity_score:.3f})"
             )
 
             return {
                 "faq_result": faq_result,
-                "last_faq_index": len(conversation_history)
+                "last_faq_index": len(conversation_history),
+                "last_faq_query": customer_query,  # 중복 방지를 위해 쿼리 저장
             }
 
         except Exception as e:
-            logger.error(f"faq_search_node search failed: {e}")
+            logger.error(f"[FAQ] 검색 실패: {e}")
             return {
                 "faq_result": {
                     "skipped": False,
-                    "intent_label": intent_label,
                     "query": customer_query,
-                    "category": category,
                     "faqs": [],
                     "error": str(e)
                 },
@@ -1096,9 +1162,9 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
           |
           +---> summarize ---------> END
           |
-          +---> intent --+-> rag_policy ---> END  (정책 RAG 검색)
-          |              |
-          |              +-> faq_search ----> END  (FAQ semantic cache - 병렬)
+          +---> intent --> rag_policy ---> END  (정책 RAG 검색)
+          |
+          +---> faq_search --------> END  (FAQ 검색 - STT 직후 바로 실행)
           |
           +---> sentiment ---------> END
           |
@@ -1106,11 +1172,10 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
           |
           +---> risk --------------> END
 
-    듀얼 패스 RAG 검색:
-        - intent 노드에서 의도 분석 후 병렬 분기
-        - rag_policy: 정책 RAG 검색 (요금제, 결합할인 등)
-        - faq_search: FAQ semantic cache 검색 (멤버십 FAQ)
-        - 두 결과를 프론트엔드에서 통합하여 RAG 카드에 표시
+    FAQ 검색 최적화:
+        - faq_search: START에서 바로 분기 (STT 응답 직후 실행)
+        - rag_policy: intent 분석 후 실행 (의도 기반 정책 검색)
+        - FAQ는 intent와 독립적으로 병렬 실행되어 빠른 응답 제공
     """
 
     graph = StateGraph(
@@ -1136,16 +1201,16 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
     graph.add_node("rag_policy", rag_policy_node)
     graph.add_node("faq_search", faq_search_node)
 
-    # START에서 다섯 노드로 "팬아웃" (rag_policy, faq_search 제외)
+    # START에서 병렬 팬아웃 (faq_search도 START에서 바로 분기)
     graph.add_edge(START, "summarize")
     graph.add_edge(START, "intent")
     graph.add_edge(START, "sentiment")
     graph.add_edge(START, "draft_reply")
     graph.add_edge(START, "risk")
+    graph.add_edge(START, "faq_search")  # STT 직후 바로 FAQ 검색
 
-    # intent -> rag_policy, faq_search (의도 분석 후 병렬 RAG 검색)
+    # intent -> rag_policy (의도 분석 후 정책 RAG 검색)
     graph.add_edge("intent", "rag_policy")
-    graph.add_edge("intent", "faq_search")
 
     # 각 노드에서 END로 "팬인"
     graph.add_edge("summarize", END)
@@ -1156,5 +1221,5 @@ def create_agent_graph(llm: BaseChatModel) -> StateGraph:
     graph.add_edge("faq_search", END)
 
     compiled_graph = graph.compile()
-    logger.info("상담 지원 그래프 생성 완료 (intent -> rag_policy/faq_search 병렬 실행)")
+    logger.info("[에이전트] 그래프 생성 완료 (faq_search: START에서 바로 실행)")
     return compiled_graph

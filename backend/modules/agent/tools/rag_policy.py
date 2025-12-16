@@ -144,6 +144,7 @@ class CustomerContext:
     contract_status: str = ""
     bundle_info: str = ""
     age: int = 0
+    current_data_gb: int = 0  # 현재 요금제 데이터량 (GB, 0=무제한)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "CustomerContext":
@@ -157,6 +158,7 @@ class CustomerContext:
             contract_status=data.get("contract_status", ""),
             bundle_info=data.get("bundle_info", ""),
             age=data.get("age", 0),
+            current_data_gb=data.get("current_data_gb", 0),
         )
 
     def get_customer_segments(self) -> List[str]:
@@ -352,7 +354,7 @@ async def _search_with_collections(
     try:
         db = get_db_manager()
         if not db.is_initialized:
-            logger.warning("DB not initialized, skipping RAG search")
+            logger.warning("[RAG] DB 초기화 안됨, 검색 스킵")
             return []
 
         # pgvector 코사인 유사도 검색
@@ -368,6 +370,12 @@ async def _search_with_collections(
         else:
             # 컬렉션이 없으면 모바일 요금제 기본값
             where_clause = "c.name = 'kt_mobile_plans'"
+
+        # 현재 고객의 요금제 제외 (동일 요금제 추천 방지)
+        if customer.current_plan:
+            # SQL 인젝션 방지를 위해 특수문자 이스케이프
+            safe_plan_name = customer.current_plan.replace("'", "''")
+            where_clause += f" AND (e.cmetadata->>'name' IS NULL OR e.cmetadata->>'name' != '{safe_plan_name}')"
 
         # 요금제 관련 검색 여부 (스마트 정렬 적용 대상)
         plan_collections = {"kt_mobile_plans", "kt_internet_plans", "kt_tv_plans"}
@@ -398,10 +406,43 @@ async def _search_with_collections(
             # 가격 정보 (월 요금)
             monthly_price = metadata.get("monthly_price_numeric", 0)
 
+            # document 필드에서 plan_details 파싱
+            plan_details = {}
+            document_raw = row["document"]
+            if document_raw:
+                try:
+                    import json
+                    import re
+                    # "상세 정보:" 이후의 JSON 부분 추출
+                    json_match = re.search(r'상세 정보:\s*(\{.*\})\s*$', document_raw, re.DOTALL)
+                    if json_match:
+                        json_str = json_match.group(1)
+                        doc_data = json.loads(json_str)
+                        if isinstance(doc_data, dict):
+                            plan_details = doc_data.get("plan_details", {})
+                            # name이 document에 있으면 사용
+                            if not title or title == "정책 문서":
+                                title = doc_data.get("name", title)
+                            # monthly_price_numeric이 document에 있으면 사용
+                            if not monthly_price:
+                                monthly_price = doc_data.get("monthly_price_numeric", 0)
+                    else:
+                        # 전체가 JSON인 경우 시도
+                        doc_data = json.loads(document_raw)
+                        if isinstance(doc_data, dict):
+                            plan_details = doc_data.get("plan_details", {})
+                            if not title or title == "정책 문서":
+                                title = doc_data.get("name", title)
+                            if not monthly_price:
+                                monthly_price = doc_data.get("monthly_price_numeric", 0)
+                except (json.JSONDecodeError, TypeError):
+                    # JSON 파싱 실패시 무시
+                    pass
+
             rec = PolicyRecommendation(
                 collection=row["collection_name"],
                 title=title,
-                content=row["document"][:500],
+                content=document_raw[:500] if document_raw else "",
                 relevance_score=float(row["similarity"]),
                 metadata={
                     "monthly_price": monthly_price,
@@ -409,6 +450,7 @@ async def _search_with_collections(
                     "price_sensitivity": metadata.get("price_sensitivity", ""),
                     "product_type": metadata.get("product_type", ""),
                     "search_text": metadata.get("search_text", ""),
+                    "plan_details": plan_details,
                 },
             )
 
@@ -426,8 +468,33 @@ async def _search_with_collections(
         return results[:top_k]
 
     except Exception as e:
-        logger.error(f"Search failed: {e}")
+        logger.error(f"[RAG] 검색 실패: {e}")
         return []
+
+
+def _parse_data_amount_from_text(search_text: str) -> int:
+    """search_text에서 데이터량(GB)을 파싱합니다.
+
+    Returns:
+        데이터량 (GB 단위), 무제한은 9999, 파싱 실패 시 0
+    """
+    import re
+
+    if not search_text:
+        return 0
+
+    text_lower = search_text.lower()
+
+    # 무제한 체크
+    if "무제한" in text_lower or "unlimited" in text_lower:
+        return 9999
+
+    # 숫자+GB 패턴 찾기 (예: "110GB", "11GB", "데이터 50GB")
+    match = re.search(r'(\d+)\s*(?:gb|기가)', text_lower)
+    if match:
+        return int(match.group(1))
+
+    return 0
 
 
 def _calculate_segment_match_score(
@@ -460,14 +527,35 @@ def _sort_by_customer_fit(
     """고객 특성에 맞는 요금제 순으로 정렬합니다.
 
     정렬 우선순위:
-    1. 타겟 세그먼트 매칭 점수 (높을수록 우선)
-    2. 현재 요금보다 저렴하면서 50% 이상인 요금제
-    3. 벡터 유사도 점수
+    1. 데이터량 적합성 (현재보다 많은 데이터 제공 요금제 우선)
+    2. 타겟 세그먼트 매칭 점수 (높을수록 우선)
+    3. 현재 요금보다 저렴하면서 50% 이상인 요금제
+    4. 벡터 유사도 점수
     """
     customer_segments = customer.get_customer_segments()
     current_fee = customer.monthly_fee
+    current_data = customer.current_data_gb  # 0=무제한 또는 알 수 없음
 
     def calculate_sort_key(rec: PolicyRecommendation) -> tuple:
+        # 0. 데이터량 적합성 점수 (고객이 더 많은 데이터를 원할 때)
+        search_text = rec.metadata.get("search_text", "")
+        plan_data = _parse_data_amount_from_text(search_text)
+
+        if current_data > 0 and plan_data > 0:
+            # 고객 현재 데이터량보다 많은지 확인
+            if plan_data >= current_data:
+                # 무제한(9999)이면 최우선, 그 외는 데이터량 차이로 정렬
+                data_score = 0 if plan_data == 9999 else 1
+            else:
+                # 현재보다 적은 데이터는 후순위
+                data_score = 3
+        elif plan_data == 9999:
+            # 무제한은 항상 좋음
+            data_score = 0
+        else:
+            # 데이터 정보 없음
+            data_score = 2
+
         # 1. 세그먼트 매칭 점수 (음수: 높을수록 앞으로)
         target_segment = rec.metadata.get("target_segment", "")
         price_sensitivity = rec.metadata.get("price_sensitivity", "")
@@ -479,21 +567,20 @@ def _sort_by_customer_fit(
         price = rec.metadata.get("monthly_price", 0) or 0
         if current_fee > 0 and price > 0:
             ratio = price / current_fee
-            # 50%~100% 범위가 적정 (점수 0)
-            # 그 외는 페널티
-            if 0.5 <= ratio <= 1.0:
+            # 50%~150% 범위가 적정 (업그레이드 포함)
+            if 0.5 <= ratio <= 1.5:
                 price_score = 0
             elif ratio < 0.5:
                 price_score = 1  # 너무 저렴 (급격한 다운그레이드)
             else:
-                price_score = 2  # 더 비쌈
+                price_score = 2  # 너무 비쌈
         else:
             price_score = 1
 
         # 3. 벡터 유사도 (음수: 높을수록 앞으로)
         similarity_score = -(rec.relevance_score or 0)
 
-        return (segment_score, price_score, similarity_score)
+        return (data_score, segment_score, price_score, similarity_score)
 
     return sorted(results, key=calculate_sort_key)
 
@@ -557,7 +644,7 @@ async def _get_all_membership_grades() -> List[PolicyRecommendation]:
         return results
 
     except Exception as e:
-        logger.error(f"Failed to get membership grades: {e}")
+        logger.error(f"[RAG] 멤버십 등급 조회 실패: {e}")
         return []
 
 
@@ -645,9 +732,9 @@ async def rag_policy_search(
         # 2. 검색할 컬렉션 결정
         collection_names = _get_collections_for_intent(intent_label, customer_query)
         logger.info(
-            f"RAG search: intent='{intent_label}', "
-            f"collections={collection_names}, "
-            f"customer_fee={customer.monthly_fee}"
+            f"[RAG] 검색 시작: 의도='{intent_label}', "
+            f"컬렉션={collection_names}, "
+            f"월요금={customer.monthly_fee}"
         )
 
         # 2-1. 멤버십 등급 문의인 경우 전체 등급 정보를 표로 제공
@@ -680,6 +767,16 @@ async def rag_policy_search(
         search_query = f"{intent_label} {customer_query}"
         if customer.current_plan:
             search_query = f"{search_query} 현재 {customer.current_plan}"
+
+        # 데이터량 요구사항 추가 (더 많은 데이터 요청 시)
+        data_keywords = ["많은", "더", "늘리", "부족", "초과", "무제한", "대용량"]
+        query_lower = customer_query.lower()
+        if any(kw in query_lower for kw in data_keywords):
+            if customer.current_data_gb > 0:
+                search_query = f"{search_query} 데이터 {customer.current_data_gb}GB 이상 무제한"
+            else:
+                search_query = f"{search_query} 데이터 무제한 대용량"
+
         if conversation_context:
             search_query = f"{search_query} {conversation_context[:200]}"
 
@@ -707,7 +804,7 @@ async def rag_policy_search(
         )
 
     except Exception as e:
-        logger.error(f"RAG policy search failed: {e}", exc_info=True)
+        logger.error(f"[RAG] 정책 검색 실패: {e}", exc_info=True)
         return RAGPolicyResult(
             intent_label=intent_label,
             query=customer_query,

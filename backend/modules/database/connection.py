@@ -78,7 +78,7 @@ class DatabaseManager:
             bool: 초기화 성공 여부
         """
         if self._initialized:
-            logger.info("Database already initialized")
+            logger.info("[DB] 이미 초기화됨")
             return True
 
         try:
@@ -90,10 +90,10 @@ class DatabaseManager:
                 init=self._init_connection,
             )
             self._initialized = True
-            logger.info(f"Database connection pool initialized (min={min_size}, max={max_size})")
+            logger.info(f"[DB] 연결 풀 초기화 완료 (min={min_size}, max={max_size})")
             return True
         except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
+            logger.error(f"[DB] 초기화 실패: {e}")
             self._initialized = False
             return False
 
@@ -103,7 +103,7 @@ class DatabaseManager:
             await self.pool.close()
             self.pool = None
             self._initialized = False
-            logger.info("Database connection pool closed")
+            logger.info("[DB] 연결 풀 종료")
 
     @asynccontextmanager
     async def acquire(self):

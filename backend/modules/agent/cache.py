@@ -19,6 +19,7 @@ OpenAI Implicit Prompt Caching:
 import logging
 from typing import Optional
 
+from redis.exceptions import ResponseError
 from langchain_core.caches import BaseCache
 
 from .config import redis_cache_config
@@ -44,23 +45,38 @@ def get_llm_cache() -> Optional[BaseCache]:
     _cache_initialized = True
 
     if not redis_cache_config.CACHE_ENABLED:
-        logger.info("[LLM Cache] Caching disabled by configuration")
+        logger.info("[캐시] LLM 캐싱 비활성화됨")
         return None
 
+    resolved_cache_type = redis_cache_config.CACHE_TYPE
+
     try:
-        if redis_cache_config.CACHE_TYPE == "semantic":
-            _llm_cache = _create_semantic_cache()
+        if resolved_cache_type == "semantic":
+            try:
+                _llm_cache = _create_semantic_cache()
+            except ResponseError as e:
+                error_msg = str(e).lower()
+                if "ft._list" in error_msg or "ft.list" in error_msg or "unknown command" in error_msg:
+                    logger.warning(
+                        "[캐시] Redis 서버가 RediSearch를 지원하지 않습니다. "
+                        "정확 일치 캐시로 자동 폴백합니다. 원인: %s",
+                        e,
+                    )
+                    _llm_cache = _create_exact_cache()
+                    resolved_cache_type = "exact"
+                else:
+                    raise
         else:
             _llm_cache = _create_exact_cache()
 
         logger.info(
-            f"[LLM Cache] Initialized: type={redis_cache_config.CACHE_TYPE}, "
+            f"[캐시] LLM 캐시 초기화: type={resolved_cache_type}, "
             f"ttl={redis_cache_config.CACHE_TTL}s"
         )
         return _llm_cache
 
     except Exception as e:
-        logger.warning(f"[LLM Cache] Failed to initialize: {e}. Continuing without cache.")
+        logger.warning(f"[캐시] LLM 캐시 초기화 실패: {e}. 캐시 없이 계속 진행")
         return None
 
 
@@ -84,7 +100,7 @@ def _create_semantic_cache() -> BaseCache:
     )
 
     logger.info(
-        f"[LLM Cache] RedisSemanticCache created: "
+        f"[캐시] 시맨틱 캐시 생성: "
         f"threshold={redis_cache_config.SEMANTIC_DISTANCE_THRESHOLD}"
     )
     return cache
@@ -102,7 +118,7 @@ def _create_exact_cache() -> BaseCache:
         ttl=redis_cache_config.CACHE_TTL,
     )
 
-    logger.info("[LLM Cache] RedisCache (exact match) created")
+    logger.info("[캐시] 정확 일치 캐시 생성")
     return cache
 
 
@@ -122,10 +138,10 @@ def setup_global_llm_cache() -> bool:
     try:
         from langchain_core.globals import set_llm_cache
         set_llm_cache(cache)
-        logger.info("[LLM Cache] Global LLM cache activated")
+        logger.info("[캐시] 전역 LLM 캐시 활성화")
         return True
     except Exception as e:
-        logger.warning(f"[LLM Cache] Failed to set global cache: {e}")
+        logger.warning(f"[캐시] 전역 캐시 설정 실패: {e}")
         return False
 
 
@@ -142,10 +158,10 @@ def clear_llm_cache() -> bool:
 
     try:
         cache.clear()
-        logger.info("[LLM Cache] Cache cleared")
+        logger.info("[캐시] 캐시 클리어 완료")
         return True
     except Exception as e:
-        logger.warning(f"[LLM Cache] Failed to clear cache: {e}")
+        logger.warning(f"[캐시] 캐시 클리어 실패: {e}")
         return False
 
 

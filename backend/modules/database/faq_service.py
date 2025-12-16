@@ -79,7 +79,7 @@ class FAQService:
             await redis_mgr.initialize()
 
         if not redis_mgr.is_initialized:
-            logger.error("Redis not available, FAQ service cannot initialize")
+            logger.error("[FAQ] Redis 사용 불가, 초기화 불가")
             return False
 
         # Redis에 이미 데이터가 있는지 확인
@@ -90,10 +90,10 @@ class FAQService:
                 self._faqs = data.get("faqs", [])
                 self._categories = set(faq.get("category", "") for faq in self._faqs)
                 self._initialized = True
-                logger.info(f"FAQ loaded from Redis cache: {len(self._faqs)} items")
+                logger.info(f"[FAQ] Redis 캐시에서 로드: {len(self._faqs)}개 항목")
                 return True
             except json.JSONDecodeError:
-                logger.warning("Invalid cache data, reloading from file")
+                logger.warning("[FAQ] 캐시 데이터 유효하지 않음, 파일에서 다시 로드")
 
         # JSON 파일에서 로드
         return await self._load_from_file()
@@ -101,7 +101,7 @@ class FAQService:
     async def _load_from_file(self) -> bool:
         """JSON 파일에서 FAQ를 로드하고 Redis에 캐싱합니다."""
         if not FAQ_JSON_PATH.exists():
-            logger.error(f"FAQ JSON file not found: {FAQ_JSON_PATH}")
+            logger.error(f"[FAQ] JSON 파일 없음: {FAQ_JSON_PATH}")
             return False
 
         try:
@@ -143,11 +143,11 @@ class FAQService:
                 )
 
             self._initialized = True
-            logger.info(f"FAQ loaded from file and cached: {len(self._faqs)} items, {len(self._categories)} categories")
+            logger.info(f"[FAQ] 파일에서 로드 후 캐싱: {len(self._faqs)}개 항목, {len(self._categories)}개 카테고리")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to load FAQ from file: {e}")
+            logger.error(f"[FAQ] 파일 로드 실패: {e}")
             return False
 
     async def search(self, query: str, limit: int = 5) -> list[dict]:
@@ -180,6 +180,80 @@ class FAQService:
         results.sort(key=lambda x: x[0], reverse=True)
 
         return [faq for _, faq in results[:limit]]
+
+    async def search_grouped(
+        self,
+        query: str,
+        limit: int = 10,
+        max_per_category: int = 3,
+    ) -> Dict[str, List[dict]]:
+        """키워드로 FAQ를 검색하고 카테고리별로 그룹화합니다.
+
+        Args:
+            query: 검색 쿼리
+            limit: 최대 총 결과 수
+            max_per_category: 카테고리당 최대 결과 수
+
+        Returns:
+            Dict[str, List[dict]]: 카테고리별로 그룹화된 FAQ 목록
+                {
+                    "VVIP/VIP": [faq1, faq2],
+                    "멤버십 혜택": [faq3, faq4],
+                    ...
+                }
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if not query or not query.strip():
+            return {}
+
+        query = query.strip().lower()
+        keywords = set(re.split(r'\s+', query))
+
+        # 점수와 함께 결과 수집
+        results = []
+        for faq in self._faqs:
+            score = self._calculate_relevance(faq, query, keywords)
+            if score > 0:
+                results.append((score, faq))
+
+        # 점수 순으로 정렬
+        results.sort(key=lambda x: x[0], reverse=True)
+
+        # 카테고리별 그룹화 (점수 순서 유지)
+        grouped: Dict[str, List[dict]] = {}
+        category_counts: Dict[str, int] = {}
+        total_count = 0
+
+        for score, faq in results:
+            if total_count >= limit:
+                break
+
+            category = faq.get("category", "기타")
+            if category not in grouped:
+                grouped[category] = []
+                category_counts[category] = 0
+
+            if category_counts[category] < max_per_category:
+                # 점수 정보를 FAQ에 추가
+                faq_with_score = {**faq, "_score": score}
+                grouped[category].append(faq_with_score)
+                category_counts[category] += 1
+                total_count += 1
+
+        # 카테고리 순서 정렬 (가장 높은 점수의 FAQ가 있는 카테고리 먼저)
+        category_max_scores = {
+            cat: max(f.get("_score", 0) for f in faqs)
+            for cat, faqs in grouped.items()
+        }
+        sorted_categories = sorted(
+            grouped.keys(),
+            key=lambda c: category_max_scores[c],
+            reverse=True
+        )
+
+        return {cat: grouped[cat] for cat in sorted_categories}
 
     def _calculate_relevance(self, faq: dict, query: str, keywords: set[str]) -> float:
         """FAQ와 검색어의 관련도를 계산합니다."""
@@ -228,6 +302,67 @@ class FAQService:
                 for related in related_kws:
                     if related in question or related in answer:
                         score += 0.5
+
+        # 복합 키워드 부스트 (키워드 조합 시 높은 가중치)
+        compound_boost = {
+            ("vip", "혜택"): {
+                "must_contain": ["vip"],  # 질문/답변에 반드시 포함
+                "question_bonus": ["혜택"],  # 질문에 포함 시 추가 부스트
+                "boost": 8.0,
+                "question_boost": 5.0,  # 질문에 bonus 키워드 있으면 추가
+            },
+            ("vvip", "혜택"): {
+                "must_contain": ["vvip"],
+                "question_bonus": ["혜택"],
+                "boost": 8.0,
+                "question_boost": 5.0,
+            },
+            ("등급", "혜택"): {
+                "must_contain": ["등급"],
+                "question_bonus": ["혜택"],
+                "boost": 5.0,
+                "question_boost": 3.0,
+            },
+            ("달달", "혜택"): {
+                "must_contain": ["달달"],
+                "question_bonus": ["혜택"],
+                "boost": 6.0,
+                "question_boost": 3.0,
+            },
+            ("생일", "혜택"): {
+                "must_contain": ["생일"],
+                "question_bonus": ["혜택"],
+                "boost": 6.0,
+                "question_boost": 3.0,
+            },
+            ("포인트", "적립"): {
+                "must_contain": ["포인트", "적립"],
+                "boost": 5.0,
+            },
+            ("영화", "예매"): {
+                "must_contain": ["영화"],
+                "question_bonus": ["예매"],
+                "boost": 5.0,
+                "question_boost": 3.0,
+            },
+            ("영화", "할인"): {
+                "must_contain": ["영화"],
+                "question_bonus": ["할인"],
+                "boost": 5.0,
+                "question_boost": 3.0,
+            },
+        }
+
+        for (kw1, kw2), config in compound_boost.items():
+            if kw1 in query and kw2 in query:
+                # must_contain 키워드가 질문/답변에 있는지 확인
+                content = question + " " + answer
+                if all(must_kw in content for must_kw in config["must_contain"]):
+                    score += config["boost"]
+                    # 질문에 bonus 키워드가 직접 포함된 경우 추가 부스트
+                    if "question_bonus" in config and "question_boost" in config:
+                        if any(bonus_kw in question for bonus_kw in config["question_bonus"]):
+                            score += config["question_boost"]
 
         return score
 
@@ -278,7 +413,6 @@ class FAQService:
     async def semantic_search(
         self,
         query: str,
-        category: Optional[str] = None,
         limit: int = 5,
         use_cache: bool = True,
         distance_threshold: float = 0.15,
@@ -290,7 +424,6 @@ class FAQService:
 
         Args:
             query: 검색할 질문
-            category: FAQ 카테고리 필터 (optional)
             limit: 최대 결과 수
             use_cache: 캐시 사용 여부
             distance_threshold: 유사도 임계값 (낮을수록 엄격, 기본 0.15)
@@ -317,8 +450,6 @@ class FAQService:
         # 캐시 사용 안 함
         if not use_cache:
             faqs = await self.search(query, limit)
-            if category:
-                faqs = [f for f in faqs if f.get("category") == category]
             return FAQCacheResult(
                 query=query,
                 faqs=faqs,
@@ -333,14 +464,10 @@ class FAQService:
 
         async def fallback_search(q: str, cat: Optional[str]) -> List[Dict[str, Any]]:
             """캐시 미스 시 키워드 검색 fallback."""
-            results = await self.search(q, limit)
-            if cat:
-                results = [f for f in results if f.get("category") == cat]
-            return results
+            return await self.search(q, limit)
 
         result = await cache.search_with_cache(
             query=query,
-            category=category,
             fallback_search_func=fallback_search,
             similarity_threshold=distance_threshold,
         )

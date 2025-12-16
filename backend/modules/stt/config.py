@@ -173,12 +173,12 @@ streaming_config = StreamingConfig()
 # 설정 로드 확인 로그
 # ============================================================
 
-logger.info(f"[STT Config] .env 경로: {_env_path} (존재: {_env_path.exists()})")
-logger.info(f"[STT Config] Google Cloud 설정 완료: {google_cloud_config.is_configured}")
-logger.info(f"[STT Config] 프로젝트 ID: {google_cloud_config.PROJECT_ID}")
-logger.info(f"[STT Config] 언어: {recognition_config.LANGUAGE_CODE}, 모델: {recognition_config.MODEL}")
-logger.info(f"[STT Config] 샘플레이트: {streaming_config.TARGET_SAMPLE_RATE}Hz")
-logger.info(f"[STT Config] Adaptation 활성화: {recognition_config.ENABLE_ADAPTATION}")
+logger.info(f"[STT] 설정 로드: .env={_env_path} (존재: {_env_path.exists()})")
+logger.info(f"[STT] Google Cloud 설정: {google_cloud_config.is_configured}")
+logger.info(f"[STT] 프로젝트 ID: {google_cloud_config.PROJECT_ID}")
+logger.info(f"[STT] 언어: {recognition_config.LANGUAGE_CODE}, 모델: {recognition_config.MODEL}")
+logger.info(f"[STT] 샘플레이트: {streaming_config.TARGET_SAMPLE_RATE}Hz")
+logger.info(f"[STT] 어댑테이션 활성화: {recognition_config.ENABLE_ADAPTATION}")
 if recognition_config.ENABLE_ADAPTATION:
     _adaptation_path = adaptation_config.config_path
-    logger.info(f"[STT Config] Adaptation 설정 파일: {_adaptation_path} (존재: {_adaptation_path.exists() if _adaptation_path else 'N/A'})")
+    logger.info(f"[STT] 어댑테이션 설정 파일: {_adaptation_path} (존재: {_adaptation_path.exists() if _adaptation_path else 'N/A'})")

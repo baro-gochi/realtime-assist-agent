@@ -28,6 +28,8 @@ from .consultation_repository import (
     get_session_repository,
     get_transcript_repository,
     get_agent_result_repository,
+    AgentRepository,
+    get_agent_repository,
 )
 from .log_handler import DatabaseLogHandler
 from .faq_service import FAQService, get_faq_service
@@ -49,6 +51,9 @@ __all__ = [
     "get_session_repository",
     "get_transcript_repository",
     "get_agent_result_repository",
+    # Agent repository
+    "AgentRepository",
+    "get_agent_repository",
     # Log handler
     "DatabaseLogHandler",
     # FAQ services
