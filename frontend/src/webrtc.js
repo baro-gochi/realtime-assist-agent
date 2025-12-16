@@ -32,6 +32,8 @@
  * await client.startCall();
  */
 
+import logger from './logger';
+
 /**
  * WebRTC 클라이언트 클래스
  *
@@ -131,7 +133,7 @@ export class WebRTCClient {
       // 환경변수 우선, 없으면 현재 호스트 사용
       const apiBase = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.host}`;
       const backendUrl = `${apiBase}/api/turn-credentials`;
-      console.log('🔄 Prefetching TURN credentials from:', backendUrl);
+      logger.debug('Prefetching TURN credentials from:', backendUrl);
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -149,12 +151,12 @@ export class WebRTCClient {
 
       if (response.ok) {
         this.turnServers = await response.json();
-        console.log('✅ TURN credentials prefetched successfully');
+        logger.debug('TURN credentials prefetched successfully');
       } else {
-        console.warn('⚠️ Failed to prefetch TURN credentials, will use STUN only');
+        logger.warn('Failed to prefetch TURN credentials, will use STUN only');
       }
     } catch (error) {
-      console.warn('⚠️ Error prefetching TURN credentials:', error.message);
+      logger.warn('Error prefetching TURN credentials:', error.message);
     }
   }
 
@@ -199,37 +201,35 @@ export class WebRTCClient {
         const separator = wsUrl.includes('?') ? '&' : '?';
         wsUrl = `${wsUrl}${separator}token=${encodeURIComponent(this.authToken)}`;
       }
-      console.log('🔌 Attempting to connect to:', wsUrl);
+      logger.debug('Attempting to connect to:', wsUrl);
 
       try {
         this.ws = new WebSocket(wsUrl);
       } catch (error) {
-        console.error('🔌 Failed to create WebSocket:', error);
+        logger.error('Failed to create WebSocket:', error);
         reject(new Error(`Failed to create WebSocket: ${error.message}`));
         return;
       }
 
       this.ws.onopen = () => {
-        console.log('🔌 WebSocket connected successfully');
+        logger.info('WebSocket connected successfully');
         resolve();
       };
 
       this.ws.onerror = (error) => {
-        console.error('🔌 WebSocket error:', error);
-        console.error('🔌 WebSocket readyState:', this.ws.readyState);
+        logger.error('WebSocket error:', error);
+        logger.debug('WebSocket readyState:', this.ws.readyState);
         if (this.onError) this.onError(new Error(`WebSocket connection failed to ${this.signalingUrl}`));
         reject(new Error(`WebSocket connection failed to ${this.signalingUrl}`));
       };
 
       this.ws.onclose = (event) => {
-        console.log('🔌 WebSocket closed');
-        console.log('🔌 Close code:', event.code);
-        console.log('🔌 Close reason:', event.reason);
-        console.log('🔌 Was clean:', event.wasClean);
+        logger.info('WebSocket closed');
+        logger.debug('Close code:', event.code, 'reason:', event.reason, 'wasClean:', event.wasClean);
 
         // Handle authentication failure
         if (event.code === 4001) {
-          console.error('🔌 Authentication failed - unauthorized');
+          logger.error('Authentication failed - unauthorized');
           sessionStorage.removeItem('auth_token');
           if (this.onError) this.onError(new Error('Unauthorized - please re-login'));
           window.location.reload();
@@ -241,7 +241,7 @@ export class WebRTCClient {
           const message = JSON.parse(event.data);
           await this.handleSignalingMessage(message);
         } catch (error) {
-          console.error('Error handling signaling message:', error);
+          logger.error('Error handling signaling message:', error);
           if (this.onError) this.onError(error);
         }
       };
@@ -281,71 +281,70 @@ export class WebRTCClient {
     switch (type) {
       case 'peer_id':
         this.peerId = data.peer_id;
-        console.log('Received peer ID:', this.peerId);
+        logger.debug('Received peer ID:', this.peerId);
         if (this.onPeerId) this.onPeerId(this.peerId);
         break;
 
       case 'room_joined':
-        console.log('Joined room:', data.room_name);
+        logger.info('Joined room:', data.room_name);
         if (this.onRoomJoined) {
           this.onRoomJoined(data);
         }
         break;
 
       case 'user_joined':
-        console.log('User joined:', data.nickname);
+        logger.info('User joined:', data.nickname);
         if (this.onUserJoined) {
           this.onUserJoined(data);
         }
         break;
 
       case 'user_left':
-        console.log('User left:', data.nickname);
+        logger.info('User left:', data.nickname);
         if (this.onUserLeft) {
           this.onUserLeft(data);
         }
         break;
 
       case 'answer':
-        console.log('Received answer from server');
+        logger.debug('Received answer from server');
         await this.handleAnswer(data);
         break;
 
       case 'ice_candidate':
-        console.log('Received ICE candidate from server');
+        logger.debug('Received ICE candidate from server');
         await this.handleIceCandidate(data);
         break;
 
       case 'renegotiation_needed':
-        console.log('🔄 Renegotiation needed:', data.reason);
+        logger.debug('Renegotiation needed:', data.reason);
         // CRITICAL: Wait for connection to be established before renegotiating
         // Renegotiating too early causes ICE transport to close prematurely
         if (this.pc && this.pc.connectionState === 'connected') {
-          console.log('✅ Connection ready, renegotiating now');
+          logger.debug('Connection ready, renegotiating now');
           await this.renegotiate();
         } else {
-          console.log('🔄 Deferring renegotiation - connection not ready (state:', this.pc?.connectionState || 'no pc', ')');
+          logger.debug('Deferring renegotiation - connection not ready (state:', this.pc?.connectionState || 'no pc', ')');
           this.needsRenegotiation = true;
         }
         break;
 
       case 'transcript':
-        console.log('💬 Transcript received:', data);
+        logger.debug('Transcript received');
         if (this.onTranscript) {
           this.onTranscript(data);
         }
         break;
 
       case 'agent_ready':
-        console.log('🤖 Agent ready:', data);
+        logger.debug('Agent ready');
         if (this.onAgentReady) {
           this.onAgentReady(data);
         }
         break;
 
       case 'agent_update':
-        console.log('🤖 Agent update received - full message:', message);
-        console.log('🤖 Agent update - node:', message.node, 'data:', message.data);
+        logger.debug('Agent update - node:', message.node);
         if (this.onAgentUpdate) {
           this.onAgentUpdate({
             turnId: message.turn_id,
@@ -356,35 +355,35 @@ export class WebRTCClient {
         break;
 
       case 'agent_status':
-        console.log('🤖 Agent status:', data);
+        logger.debug('Agent status:', data.status);
         if (this.onAgentStatus) this.onAgentStatus(data);
         break;
 
       case 'agent_consultation':
-        console.log('🤖 Agent consultation result:', data);
+        logger.debug('Agent consultation result received');
         if (this.onAgentConsultation) this.onAgentConsultation(data);
         break;
 
       case 'agent_error':
-        console.error('🤖 Agent error:', data);
+        logger.error('Agent error:', data);
         if (this.onAgentStatus) this.onAgentStatus({ task: data.task, status: 'error' });
         if (this.onError) this.onError(new Error(data.message || 'Agent error'));
         break;
 
       case 'session_ended':
-        console.log('📝 Session ended:', data);
+        logger.info('Session ended');
         if (this.onSessionEnded) {
           this.onSessionEnded(data);
         }
         break;
 
       case 'error':
-        console.error('Server error:', data.message);
+        logger.error('Server error:', data.message);
         if (this.onError) this.onError(new Error(data.message));
         break;
 
       default:
-        console.warn('Unknown message type:', type);
+        logger.warn('Unknown message type:', type);
     }
   }
 
@@ -414,7 +413,7 @@ export class WebRTCClient {
    * - 여러 룸을 동시에 운영 가능
    * - 빈 룸은 자동으로 삭제됨
    */
-  async joinRoom(roomName, nickname, phoneNumber = null) {
+  async joinRoom(roomName, nickname, phoneNumber = null, agentCode = null) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected');
     }
@@ -432,9 +431,15 @@ export class WebRTCClient {
       joinData.phone_number = phoneNumber;
     }
 
+    // 상담사인 경우 상담사 코드 추가
+    if (agentCode) {
+      joinData.agent_code = agentCode;
+    }
+
+    logger.debug('[WebRTC] joinRoom data:', { room_name: roomName, nickname });
     this.sendMessage('join_room', joinData);
 
-    console.log(`Joining room '${roomName}' as '${nickname}'${phoneNumber ? ` (phone: ${phoneNumber})` : ''}`);
+    logger.info(`Joining room '${roomName}' as '${nickname}'`);
   }
 
   /**
@@ -472,9 +477,8 @@ export class WebRTCClient {
    */
   async getLocalMedia() {
     try {
-      console.log('🎤 Requesting microphone permissions...');
-      console.log('🔒 Current protocol:', window.location.protocol);
-      console.log('🔒 Is secure context:', window.isSecureContext);
+      logger.debug('Requesting microphone permissions...');
+      logger.debug('Secure context:', window.isSecureContext);
 
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: false,
@@ -486,13 +490,11 @@ export class WebRTCClient {
           noiseSuppression: false,     // 노이즈 제거 끄기
         }
       });
-      console.log('✅ Local audio stream obtained');
-      console.log('🎤 Audio tracks:', this.localStream.getAudioTracks().length);
+      logger.info('Local audio stream obtained');
+      logger.debug('Audio tracks:', this.localStream.getAudioTracks().length);
       return this.localStream;
     } catch (error) {
-      console.error('❌ Error getting local media:', error);
-      console.error('❌ Error name:', error.name);
-      console.error('❌ Error message:', error.message);
+      logger.error('Error getting local media:', error.name, error.message);
 
       // Show user-friendly error
       let userMessage = '마이크 접근 실패: ';
@@ -557,10 +559,9 @@ export class WebRTCClient {
     // Use cached AWS coturn credentials if available
     if (this.turnServers) {
       iceServers = iceServers.concat(this.turnServers);
-      console.log('✅ Using prefetched AWS coturn credentials');
+      logger.debug('Using prefetched AWS coturn credentials');
     } else {
-      console.warn('⚠️ AWS coturn credentials not prefetched yet, using Google STUN only');
-      console.warn('💡 TIP: Connection may fail behind strict NAT/firewall');
+      logger.warn('AWS coturn credentials not prefetched yet, using Google STUN only');
     }
 
     // Create RTCPeerConnection with fetched ICE servers
@@ -571,29 +572,21 @@ export class WebRTCClient {
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
         this.pc.addTrack(track, this.localStream);
-        console.log('Added local track:', track.kind);
+        logger.debug('Added local track:', track.kind);
       });
     }
 
     // Handle remote tracks
     this.pc.ontrack = (event) => {
-      console.log('🎥 Received remote track:', event.track.kind);
-      console.log('🎥 Track ID:', event.track.id);
-      console.log('🎥 Track state:', event.track.readyState);
+      logger.debug('Received remote track:', event.track.kind);
 
       // 오디오 재생 지연 버퍼 설정 (패킷 손실/지터로 인한 끊김 방지)
       if (event.receiver && event.track.kind === 'audio') {
-        // jitter buffer 설정 증가 (로봇 소리 방지)
-        // 50ms 버퍼로 네트워크 지터 흡수
         event.receiver.playoutDelayHint = 0.05; // 50ms 재생 지연
-
-        // jitterBufferTarget 설정 (지원하는 브라우저에서)
         if ('jitterBufferTarget' in event.receiver) {
-          event.receiver.jitterBufferTarget = 50; // 50ms 타겟
-          console.log('🔊 Jitter buffer target set to 50ms');
+          event.receiver.jitterBufferTarget = 50;
         }
-
-        console.log('🔊 Audio playout delay hint set to 50ms');
+        logger.debug('Audio jitter buffer configured');
       }
 
       // Add only the received track (not all tracks from stream)
@@ -602,22 +595,17 @@ export class WebRTCClient {
       // 기존 같은 종류의 트랙이 있으면 제거
       const existingTracks = this.remoteStream.getTracks().filter(t => t.kind === track.kind);
       existingTracks.forEach(t => {
-        console.log('🎥 Removing old track:', t.kind, t.id);
         this.remoteStream.removeTrack(t);
       });
 
       this.remoteStream.addTrack(track);
-      console.log('🎥 Track added to remoteStream:', track.kind, track.id);
-
-      const currentTracks = this.remoteStream.getTracks();
-      console.log('🎤 Remote stream now has tracks:',
-        currentTracks.map(t => `${t.kind}:${t.id}:${t.readyState}`));
+      logger.debug('Track added to remoteStream:', track.kind);
 
       // 오디오 트랙이 있으면 콜백 호출
-      const hasAudio = currentTracks.some(t => t.kind === 'audio');
+      const hasAudio = this.remoteStream.getTracks().some(t => t.kind === 'audio');
 
       if (hasAudio && this.onRemoteStream) {
-        console.log('🎤 Audio track received, calling onRemoteStream callback');
+        logger.debug('Audio track received, calling onRemoteStream callback');
         this.onRemoteStream(this.remoteStream);
       }
     };
@@ -625,7 +613,7 @@ export class WebRTCClient {
     // Handle ICE candidates
     this.pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('New ICE candidate:', event.candidate);
+        logger.debug('New ICE candidate');
         this.sendMessage('ice_candidate', {
           candidate: event.candidate.toJSON()
         });
@@ -635,7 +623,7 @@ export class WebRTCClient {
     // Handle connection state changes
     this.pc.onconnectionstatechange = () => {
       const state = this.pc.connectionState;
-      console.log('Connection state:', state);
+      logger.info('Connection state:', state);
 
       if (this.onConnectionStateChange) {
         this.onConnectionStateChange(state);
@@ -643,7 +631,7 @@ export class WebRTCClient {
 
       // Execute deferred renegotiation when connection is established
       if (state === 'connected' && this.needsRenegotiation) {
-        console.log('🔄 Executing deferred renegotiation');
+        logger.debug('Executing deferred renegotiation');
         this.needsRenegotiation = false;
         this.renegotiate();
       }
@@ -658,7 +646,7 @@ export class WebRTCClient {
 
     await this.pc.setLocalDescription(offer);
 
-    console.log('Sending offer to server');
+    logger.debug('Sending offer to server');
     this.sendMessage('offer', {
       sdp: offer.sdp,
       type: offer.type
@@ -697,18 +685,18 @@ export class WebRTCClient {
     try {
       // Check if we have a peer connection
       if (!this.pc) {
-        console.warn('⚠️ No peer connection exists, ignoring answer');
+        logger.warn('No peer connection exists, ignoring answer');
         return;
       }
 
       // Check current signaling state
-      console.log('📡 Current signaling state:', this.pc.signalingState);
+      logger.debug('Current signaling state:', this.pc.signalingState);
 
-      // DEBUG: Check if answer SDP contains ICE candidates
+      // Check if answer SDP contains ICE candidates
       const candidateCount = (answer.sdp.match(/a=candidate:/g) || []).length;
-      console.log(`📋 Answer SDP contains ${candidateCount} ICE candidates`);
+      logger.debug(`Answer SDP contains ${candidateCount} ICE candidates`);
       if (candidateCount === 0) {
-        console.warn('⚠️ WARNING: Answer SDP has NO ICE candidates! Backend ICE gathering may have failed.');
+        logger.warn('Answer SDP has NO ICE candidates! Backend ICE gathering may have failed.');
       }
 
       // Only set remote description if we're in the correct state
@@ -723,23 +711,23 @@ export class WebRTCClient {
         await this.pc.setRemoteDescription(
           new RTCSessionDescription(modifiedAnswer)
         );
-        console.log('✅ Remote description set (with Opus optimization), state:', this.pc.signalingState);
+        logger.debug('Remote description set, state:', this.pc.signalingState);
 
         // NOW process buffered ICE candidates (remote description is set)
         if (this.pendingCandidates && this.pendingCandidates.length > 0) {
-          console.log(`📦 Processing ${this.pendingCandidates.length} buffered ICE candidates`);
+          logger.debug(`Processing ${this.pendingCandidates.length} buffered ICE candidates`);
           for (const candidateData of this.pendingCandidates) {
             await this.handleIceCandidate(candidateData);
           }
           this.pendingCandidates = [];
         }
       } else if (this.pc.signalingState === 'stable') {
-        console.warn('⚠️ Already in stable state, ignoring duplicate answer');
+        logger.warn('Already in stable state, ignoring duplicate answer');
       } else {
-        console.warn(`⚠️ Unexpected state ${this.pc.signalingState}, cannot set answer`);
+        logger.warn(`Unexpected state ${this.pc.signalingState}, cannot set answer`);
       }
     } catch (error) {
-      console.error('❌ Error setting remote description:', error);
+      logger.error('Error setting remote description:', error);
       if (this.onError) this.onError(error);
     }
   }
@@ -764,17 +752,14 @@ export class WebRTCClient {
    */
   async handleIceCandidate(candidateData) {
     try {
-      // DEBUG: Log full structure
-      console.log('📋 Raw candidate data:', candidateData);
-
       if (!candidateData.candidate) {
-        console.warn('⚠️ Received empty ICE candidate, ignoring');
+        logger.warn('Received empty ICE candidate, ignoring');
         return;
       }
 
       // If peer connection doesn't exist yet OR remote description not set, buffer the candidate
       if (!this.pc || !this.pc.remoteDescription) {
-        console.log('📦 Buffering ICE candidate (remote description not ready yet)');
+        logger.debug('Buffering ICE candidate (remote description not ready yet)');
         if (!this.pendingCandidates) {
           this.pendingCandidates = [];
         }
@@ -788,15 +773,12 @@ export class WebRTCClient {
         ? candidateData.candidate
         : candidateData;
 
-      console.log('📋 Candidate init:', candidateInit);
-
       const iceCandidate = new RTCIceCandidate(candidateInit);
 
       await this.pc.addIceCandidate(iceCandidate);
-      console.log('✅ ICE candidate added');
+      logger.debug('ICE candidate added');
     } catch (error) {
-      console.error('❌ Error adding ICE candidate:', error);
-      console.error('Candidate data:', candidateData);
+      logger.error('Error adding ICE candidate:', error);
       if (this.onError) this.onError(error);
     }
   }
@@ -840,9 +822,9 @@ export class WebRTCClient {
         message = typeOrMessage;
       }
       this.ws.send(JSON.stringify(message));
-      console.log('📤 Sent message:', message.type);
+      logger.debug('Sent message:', message.type);
     } else {
-      console.warn('⚠️ WebSocket not connected, cannot send message');
+      logger.warn('WebSocket not connected, cannot send message');
     }
   }
 
@@ -867,22 +849,29 @@ export class WebRTCClient {
     return new Promise((resolve) => {
       // Set up one-time handler for session_ended response
       const originalHandler = this.onSessionEnded;
+      let timeoutId = null;
+
       this.onSessionEnded = (data) => {
+        // Clear timeout to prevent race condition
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
         // Restore original handler
         this.onSessionEnded = originalHandler;
         if (originalHandler) originalHandler(data);
         resolve(data);
       };
 
-      // Set timeout for response
-      const timeout = setTimeout(() => {
+      // Set timeout for response (30 seconds to allow LLM summary generation)
+      timeoutId = setTimeout(() => {
         this.onSessionEnded = originalHandler;
         resolve({
           success: false,
           session_id: null,
           message: 'Session end request timed out'
         });
-      }, 10000);
+      }, 30000);
 
       // Send end_session message
       this.sendMessage('end_session', {});
@@ -907,11 +896,11 @@ export class WebRTCClient {
   async renegotiate() {
     try {
       if (!this.pc) {
-        console.warn('No peer connection to renegotiate');
+        logger.warn('No peer connection to renegotiate');
         return;
       }
 
-      console.log('🔄 Creating new offer for renegotiation');
+      logger.debug('Creating new offer for renegotiation');
 
       // Create new offer
       const offer = await this.pc.createOffer();
@@ -927,9 +916,9 @@ export class WebRTCClient {
         type: offer.type
       });
 
-      console.log('🔄 Renegotiation offer sent');
+      logger.debug('Renegotiation offer sent');
     } catch (error) {
-      console.error('Error during renegotiation:', error);
+      logger.error('Error during renegotiation:', error);
       if (this.onError) this.onError(error);
     }
   }
@@ -960,7 +949,7 @@ export class WebRTCClient {
       await this.getLocalMedia();
       await this.createPeerConnection();
     } catch (error) {
-      console.error('Error starting call:', error);
+      logger.error('Error starting call:', error);
       if (this.onError) this.onError(error);
       throw error;
     }
@@ -1027,7 +1016,7 @@ export class WebRTCClient {
     this.remoteStream.getTracks().forEach(track => track.stop());
     this.remoteStream = new MediaStream();
 
-    console.log('Call stopped');
+    logger.info('Call stopped');
   }
 
   /**
@@ -1063,7 +1052,7 @@ export class WebRTCClient {
       this.ws = null;
     }
 
-    console.log('Disconnected');
+    logger.info('Disconnected');
   }
 
   /**
@@ -1077,7 +1066,7 @@ export class WebRTCClient {
   async startLocalStream(constraints = { audio: true, video: false }) {
     try {
       this.localStream = await navigator.mediaDevices.getUserMedia(constraints);
-      console.log('🎤 Local stream started:', this.localStream.getTracks().map(t => t.kind));
+      logger.debug('Local stream started:', this.localStream.getTracks().map(t => t.kind));
 
       // 로컬 스트림 콜백 호출
       if (this.onLocalStream) {
@@ -1095,7 +1084,7 @@ export class WebRTCClient {
 
       return this.localStream;
     } catch (error) {
-      console.error('❌ Failed to start local stream:', error);
+      logger.error('Failed to start local stream:', error);
       throw error;
     }
   }
@@ -1109,7 +1098,7 @@ export class WebRTCClient {
         track.stop();
       });
       this.localStream = null;
-      console.log('🛑 Local stream stopped');
+      logger.debug('Local stream stopped');
     }
   }
 
@@ -1126,7 +1115,7 @@ export class WebRTCClient {
         audioTracks.forEach(track => {
           track.enabled = enabled;
         });
-        console.log(`🎤 Audio ${enabled ? 'enabled' : 'disabled'}`);
+        logger.debug(`Audio ${enabled ? 'enabled' : 'disabled'}`);
         return enabled;
       }
     }
@@ -1159,7 +1148,7 @@ export class WebRTCClient {
    */
   async setAudioBitrate(bitrate) {
     if (!this.pc) {
-      console.warn('⚠️ PeerConnection not available for bitrate setting');
+      logger.warn('PeerConnection not available for bitrate setting');
       return;
     }
 
@@ -1167,7 +1156,7 @@ export class WebRTCClient {
     const audioSender = senders.find(s => s.track?.kind === 'audio');
 
     if (!audioSender) {
-      console.warn('⚠️ No audio sender found for bitrate setting');
+      logger.warn('No audio sender found for bitrate setting');
       return;
     }
 
@@ -1183,9 +1172,9 @@ export class WebRTCClient {
       params.encodings[0].maxBitrate = bitrate;
 
       await audioSender.setParameters(params);
-      console.log(`🎵 Audio bitrate set to ${bitrate}bps via RTCRtpSender`);
+      logger.debug(`Audio bitrate set to ${bitrate}bps`);
     } catch (error) {
-      console.error('❌ Failed to set audio bitrate:', error);
+      logger.error('Failed to set audio bitrate:', error);
     }
   }
 
@@ -1238,7 +1227,7 @@ export class WebRTCClient {
           line += ';stereo=0;sprop-stereo=0';
         }
 
-        console.log('🔧 Opus optimized in SDP:', line);
+        logger.debug('Opus optimized in SDP');
       }
 
       // ptime 설정 (20ms 패킷 - 표준적이고 안정적)
