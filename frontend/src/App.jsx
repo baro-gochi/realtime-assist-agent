@@ -4,7 +4,7 @@
  * @description
  * React Router를 사용하여 페이지 라우팅을 관리합니다.
  * 비밀번호 인증을 통해 애플리케이션 접근을 제어합니다.
- * 비디오 기능 없이 음성 통화만 지원합니다.
+ * 전역 다크모드 상태를 관리하고 모든 페이지에 전달합니다.
  *
  * 라우트:
  * - / : AssistantMain (AI 상담 어시스턴트 대시보드 - 음성 전용)
@@ -13,14 +13,47 @@
 import { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import AssistantMain from './AssistantMain';
+import AgentRegister from './AgentRegister';
+import AgentHistory from './AgentHistory';
 import './App.css';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 /**
+ * 테마 토글 버튼 컴포넌트
+ */
+function ThemeToggleButton({ isDarkMode, onToggle }) {
+  return (
+    <button
+      className="theme-toggle-global"
+      onClick={onToggle}
+      title={isDarkMode ? '라이트 모드' : '다크 모드'}
+    >
+      {isDarkMode ? (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+      ) : (
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/**
  * 비밀번호 입력 화면 컴포넌트
  */
-function PasswordScreen({ onAuthenticated }) {
+function PasswordScreen({ onAuthenticated, isDarkMode, onToggleTheme }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -56,64 +89,26 @@ function PasswordScreen({ onAuthenticated }) {
   };
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      height: '100vh',
-      fontFamily: 'sans-serif',
-      background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-    }}>
-      <div style={{
-        background: 'white',
-        padding: '40px',
-        borderRadius: '12px',
-        boxShadow: '0 10px 40px rgba(0,0,0,0.2)',
-        width: '100%',
-        maxWidth: '400px',
-      }}>
-        <h1 style={{ textAlign: 'center', marginBottom: '10px', color: '#333' }}>
-          🔐 실시간 상담 어시스턴트
-        </h1>
-        <p style={{ textAlign: 'center', color: '#666', marginBottom: '30px' }}>
-          접근하려면 비밀번호를 입력하세요
-        </p>
+    <div className="password-screen">
+      <ThemeToggleButton isDarkMode={isDarkMode} onToggle={onToggleTheme} />
+      <div className="password-card">
+        <h1>실시간 상담 어시스턴트</h1>
+        <p className="subtitle">접근하려면 비밀번호를 입력하세요</p>
         <form onSubmit={handleSubmit}>
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="비밀번호 입력"
-            style={{
-              width: '100%',
-              padding: '12px 16px',
-              fontSize: '16px',
-              border: '2px solid #e0e0e0',
-              borderRadius: '8px',
-              marginBottom: '16px',
-              boxSizing: 'border-box',
-            }}
             autoFocus
           />
           {error && (
-            <p style={{ color: '#e53935', fontSize: '14px', marginBottom: '16px' }}>
-              ❌ {error}
-            </p>
+            <p className="error-text">{error}</p>
           )}
           <button
             type="submit"
             disabled={loading || !password}
-            style={{
-              width: '100%',
-              padding: '12px',
-              fontSize: '16px',
-              background: loading ? '#ccc' : '#4F46E5',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
+            className="submit-btn"
           >
             {loading ? '확인 중...' : '로그인'}
           </button>
@@ -126,6 +121,39 @@ function PasswordScreen({ onAuthenticated }) {
 function App() {
   const [authToken, setAuthToken] = useState(null);
   const [checkingAuth, setCheckingAuth] = useState(true);
+
+  // 다크모드 상태 (localStorage 값 우선, 없으면 시스템 설정 따라감)
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    const saved = localStorage.getItem('darkMode');
+    if (saved !== null) {
+      return saved === 'true';
+    }
+    // localStorage에 저장된 값이 없으면 시스템 설정 따라감
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+
+  // 다크모드 변경 시 localStorage 저장 및 document 속성 설정
+  useEffect(() => {
+    localStorage.setItem('darkMode', isDarkMode);
+    document.documentElement.setAttribute('data-theme', isDarkMode ? 'dark' : 'light');
+  }, [isDarkMode]);
+
+  // 시스템 설정 변경 감지 (사용자가 수동 설정 안 했을 때만)
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handleChange = (e) => {
+      // localStorage에 저장된 값이 없을 때만 시스템 설정 따라감
+      if (localStorage.getItem('darkMode') === null) {
+        setIsDarkMode(e.matches);
+      }
+    };
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
+
+  const toggleDarkMode = () => {
+    setIsDarkMode(prev => !prev);
+  };
 
   useEffect(() => {
     // sessionStorage에서 저장된 토큰 확인 (브라우저 닫으면 삭제됨)
@@ -161,49 +189,67 @@ function App() {
 
   if (checkingAuth) {
     return (
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        height: '100vh',
-      }}>
+      <div className="auth-checking">
         <p>인증 확인 중...</p>
       </div>
     );
   }
 
   if (!authToken) {
-    return <PasswordScreen onAuthenticated={setAuthToken} />;
+    return (
+      <PasswordScreen
+        onAuthenticated={setAuthToken}
+        isDarkMode={isDarkMode}
+        onToggleTheme={toggleDarkMode}
+      />
+    );
   }
 
   return (
     <BrowserRouter>
       <Routes>
         {/* Main Route: AI Assistant Dashboard (음성 전용) */}
-        <Route path="/" element={<AssistantMain />} />
+        <Route
+          path="/"
+          element={
+            <AssistantMain
+              isDarkMode={isDarkMode}
+              onToggleTheme={toggleDarkMode}
+            />
+          }
+        />
+
+        {/* Agent Routes: 상담사 등록 및 이력 조회 */}
+        <Route
+          path="/agent/register"
+          element={
+            <AgentRegister
+              isDarkMode={isDarkMode}
+              onToggleTheme={toggleDarkMode}
+            />
+          }
+        />
+        <Route
+          path="/agent/history"
+          element={
+            <AgentHistory
+              isDarkMode={isDarkMode}
+              onToggleTheme={toggleDarkMode}
+            />
+          }
+        />
 
         {/* 404 Not Found */}
         <Route path="*" element={
-          <div style={{
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            height: '100vh',
-            fontFamily: 'sans-serif'
-          }}>
-            <h1>404 - Page Not Found</h1>
-            <p>요청하신 페이지를 찾을 수 없습니다.</p>
-            <Link to="/" style={{
-              marginTop: '20px',
-              padding: '10px 20px',
-              background: '#4F46E5',
-              color: 'white',
-              textDecoration: 'none',
-              borderRadius: '5px'
-            }}>
-              AI 어시스턴트 대시보드
-            </Link>
+          <div className="password-screen">
+            <ThemeToggleButton isDarkMode={isDarkMode} onToggle={toggleDarkMode} />
+            <div className="password-card">
+              <h1>404 - Page Not Found</h1>
+              <p className="subtitle">요청하신 페이지를 찾을 수 없습니다.</p>
+              <Link to="/" className="submit-btn" style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}>
+                AI 어시스턴트 대시보드
+              </Link>
+            </div>
           </div>
         } />
       </Routes>
