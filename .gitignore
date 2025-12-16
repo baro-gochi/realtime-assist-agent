@@ -56,3 +56,9 @@ data/json_dummie/
 data/chroma_db_plans/
 
 AGENTS.md
+
+# Logs
+logs/
+
+#testing
+backend/test/*.txt
