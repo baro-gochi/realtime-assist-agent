@@ -33,16 +33,18 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 from uuid import UUID
-from .graph import (
-    create_agent_graph,
+from .graph import create_agent_graph
+from .utils import (
     ConversationState,
-    FINAL_SUMMARY_SCHEMA,
     FINAL_SUMMARY_SYSTEM_PROMPT,
+    FinalConsultationSummary,
+    llm_config,
+    summary_llm_config,
+    setup_global_llm_cache,
+    get_cache_stats,
 )
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
-from .config import llm_config, summary_llm_config
-from .cache import setup_global_llm_cache, get_cache_stats
 from langchain.chat_models import init_chat_model
 
 # Database repositories (lazy import to avoid circular dependencies)
@@ -141,7 +143,7 @@ class RoomAgent:
         # 최종 요약 전용 LLM 초기화
         summary_llm = None
         try:
-            logger.info(f"[에이전트] 요약 LLM 초기화 중: {summary_llm_config.MODEL}")
+            logger.debug(f"[에이전트] 요약 LLM 초기화 중: {summary_llm_config.MODEL}")
             summary_llm = init_chat_model(
                 summary_llm_config.MODEL,
                 temperature=summary_llm_config.TEMPERATURE,
@@ -500,11 +502,7 @@ class RoomAgent:
 
         try:
             # Structured Output으로 LLM 호출
-            structured_llm = llm_to_use.with_structured_output(
-                FINAL_SUMMARY_SCHEMA,
-                method="json_schema",
-                strict=True
-            )
+            structured_llm = llm_to_use.with_structured_output(FinalConsultationSummary)
 
             messages = [
                 SystemMessage(content=FINAL_SUMMARY_SYSTEM_PROMPT),
@@ -515,15 +513,20 @@ class RoomAgent:
             start_time = time.time()
 
             result = await structured_llm.ainvoke(messages)
+            final_summary = (
+                result
+                if isinstance(result, FinalConsultationSummary)
+                else FinalConsultationSummary.model_validate(result)
+            )
 
             elapsed = time.time() - start_time
             logger.info(f"[에이전트] 최종 요약 완료: {elapsed:.2f}s")
 
             # LLM 반환값 확인
-            logger.debug(f"generate_final_summary result type: {type(result).__name__}")
-            logger.debug(f"consultation_type: {result.get('consultation_type') if isinstance(result, dict) else 'N/A'}")
-
-            return result if isinstance(result, dict) else {}
+            logger.debug(f"generate_final_summary result type: {type(final_summary).__name__}")
+            logger.debug(f"consultation_type: {final_summary.consultation_type}")
+            
+            return final_summary.model_dump()
 
         except Exception as e:
             logger.error(f"[에이전트] 최종 요약 실패: {e}")
@@ -589,22 +592,17 @@ class RoomAgent:
 
         session_repo, _, _ = _get_repositories()
 
-        # 최종 요약이 없으면 LLM으로 구조화된 요약 생성
-        if not final_summary:
-            logger.info(f"[에이전트] 최종 요약 생성 중...")
-            summary_data = await self.generate_final_summary()
-            logger.debug(f"summary_data keys: {list(summary_data.keys()) if summary_data else 'None'}")
-            if summary_data:
-                final_summary = self._format_final_summary_text(summary_data)
-                # 상담 유형도 자동 추출
-                if not consultation_type:
-                    consultation_type = summary_data.get("consultation_type", "")
-                logger.debug(f"extracted consultation_type: '{consultation_type}'")
-                logger.info(f"[에이전트] 최종 요약 생성 완료 - type={consultation_type}")
-            else:
-                # 폴백: 기존 실시간 요약 사용
-                final_summary = self.state.get("current_summary", "")
-                logger.warning(f"[에이전트] 최종 요약 생성 실패, 기존 요약 사용")
+        # 최종 요약 생성
+        logger.debug(f"[에이전트] 최종 요약 생성 중...")
+        summary_data = await self.generate_final_summary()
+        logger.debug(f"summary_data keys: {list(summary_data.keys()) if summary_data else 'None'}")
+        if summary_data:
+            final_summary = self._format_final_summary_text(summary_data)
+            # 상담 유형도 자동 추출
+            if not consultation_type:
+                consultation_type = summary_data.get("consultation_type", "")
+            logger.debug(f"extracted consultation_type: '{consultation_type}'")
+            logger.info(f"[에이전트] 최종 요약 생성 완료 - type={consultation_type}")
 
         logger.info(f"[에이전트] 세션 종료 DB 저장 중 - session={self.session_id}")
         logger.debug(f"end_session params: consultation_type='{consultation_type}', summary_len={len(final_summary) if final_summary else 0}")

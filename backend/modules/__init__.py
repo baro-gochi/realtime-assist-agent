@@ -14,7 +14,6 @@ NOTE: 순환 import 방지를 위해 무거운 모듈은 lazy import합니다.
 # 가벼운 모듈만 즉시 import
 from .webrtc import PeerConnectionManager, RoomManager, AudioRelayTrack
 from .stt import STTService, STTAdaptationConfig
-from .shared import SummaryResult
 from .agent import create_agent_graph, get_or_create_agent, remove_agent, RoomAgent
 from .database import (
     DatabaseManager,
@@ -44,8 +43,6 @@ __all__ = [
     # STT
     "STTService",
     "STTAdaptationConfig",
-    # Shared DTOs
-    "SummaryResult",
     # Agent (real-time summarization)
     "create_agent_graph",
     "get_or_create_agent",

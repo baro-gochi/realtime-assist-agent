@@ -75,7 +75,7 @@ from modules.agent import get_or_create_agent, remove_agent, room_agents
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load environment variables from config/.env
+# Load 환경변수 로드 variables from config/.env
 load_dotenv(Path(__file__).parent / "config" / ".env")
 
 # Access password for authentication
@@ -344,10 +344,7 @@ async def get_rooms():
     return {"rooms": room_manager.get_room_list()}
 
 
-# =============================================================================
-# Scenario Test API (for testing without STT)
-# =============================================================================
-
+# STT 연동없이 택스트 시나리오로 에이전트 테스트용 API
 class ScenarioTestRequest(BaseModel):
     """시나리오 테스트 요청 모델."""
     scenario: List[dict]  # [{"speaker": "고객", "text": "..."}, ...]
@@ -369,7 +366,7 @@ async def test_scenario(request: ScenarioTestRequest):
     from langchain_openai import ChatOpenAI
 
     # LLM 초기화
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+    llm = ChatOpenAI(model="gpt-5-mini", temperature=0)
     graph = create_agent_graph(llm)
 
     # 기본 고객 정보
