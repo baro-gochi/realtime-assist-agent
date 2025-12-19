@@ -1,22 +1,22 @@
 """
 LangGraph 텍스트 기반 테스트 스크립트
 
-사용법:
+사용법 (backend 디렉토리에서 실행):
     # 시나리오 모드 (기본 시나리오 - 요금 관련)
-    uv run python test_graph_interactive.py --scenario
+    uv run python test/test_graph_interactive.py --scenario
 
     # 시나리오 타입 선택 (billing/pass/cancel)
-    uv run python test_graph_interactive.py --scenario -t pass
-    uv run python test_graph_interactive.py --scenario -t cancel
+    uv run python test/test_graph_interactive.py --scenario -t pass
+    uv run python test/test_graph_interactive.py --scenario -t cancel
 
     # 대화형 모드 (직접 입력)
-    uv run python test_graph_interactive.py
+    uv run python test/test_graph_interactive.py
 
     # 시나리오 파일 지정
-    uv run python test_graph_interactive.py --scenario --file scenarios/pass_inquiry.json
+    uv run python test/test_graph_interactive.py --scenario --file scenarios/pass_inquiry.json
 
     # 딜레이 없이 빠른 실행
-    uv run python test_graph_interactive.py --scenario --no-delay
+    uv run python test/test_graph_interactive.py --scenario --no-delay
 
 시나리오 타입:
     - default/billing: 요금 문의, 데이터 초과, 요금제 변경, 가족결합 할인
@@ -27,14 +27,18 @@ LangGraph 텍스트 기반 테스트 스크립트
 import asyncio
 import argparse
 import json
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from io import StringIO
 
+# backend 모듈 import를 위한 경로 추가
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / "config" / ".env")
+load_dotenv(Path(__file__).parent.parent / "config" / ".env")
 
 from modules.agent.graph import create_agent_graph, ContextSchema
 from modules.agent.cache import setup_global_llm_cache, get_cache_stats
@@ -630,8 +634,7 @@ class GraphTester:
 
 def get_default_output_path() -> str:
     """기본 출력 파일 경로 생성 (test/ 디렉토리에 타임스탬프 파일명)"""
-    test_dir = Path(__file__).parent / "test"
-    test_dir.mkdir(exist_ok=True)
+    test_dir = Path(__file__).parent
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return str(test_dir / f"result_{timestamp}.txt")
 
