@@ -4,6 +4,27 @@
 - 팀장 : 🧑 이찬구
 - 팀원 : 🧑 김재홍 🧑 장윤호
 
+## 부록 A: 파일 통계
+
+| 카테고리 | 파일 수 | 코드 라인 |
+|----------|---------|-----------|
+| 백엔드 Python | 35 | ~5,500 |
+| 프론트엔드 JS/JSX | 7 | ~2,500 |
+| 설정 | 8 | ~200 |
+| **합계** | **50** | **~8,200** |
+
+## 부록 B: 의존성 분석
+
+**백엔드 (pyproject.toml)**:
+- 핵심: fastapi, uvicorn, aiortc, websockets
+- AI/ML: langchain, langgraph, openai, langsmith
+- 데이터베이스: asyncpg, chromadb, redis
+- Google Cloud: google-cloud-speech
+
+**프론트엔드 (package.json)**:
+- 핵심: react, react-dom, react-router-dom
+- 빌드: vite, @vitejs/plugin-react
+
 ## 프로젝트 개요
 
 **Realtime Assist Agent** - LangGraph 기반 실시간 상담 어시스턴트 에이전트
