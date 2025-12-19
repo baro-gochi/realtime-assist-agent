@@ -57,13 +57,6 @@ class StorageConfig:
     # 기본 데이터 디렉토리
     DATA_DIR: Path = Path("data")
 
-    # 트랜스크립트 저장 경로
-    TRANSCRIPTS_DIR: Path = DATA_DIR / "transcripts"
-
-    def ensure_dirs(self) -> None:
-        """필요한 디렉토리 생성."""
-        self.TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-
 
 # ============================================================
 # WebRTC 연결 설정

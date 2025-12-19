@@ -317,9 +317,6 @@ class RoomManager:
 
             # Delete room if empty
             if not self.rooms[room_name]:
-                # Save transcript to file before deleting room
-                self._save_transcript_to_file(room_name)
-
                 # DB에 룸 종료 기록 (백그라운드)
                 if room_db_id:
                     asyncio.create_task(self._end_room_in_db(room_db_id, room_name))
@@ -597,54 +594,6 @@ class RoomManager:
             )
         except Exception as e:
             logger.error(f"[WebRTC] 대화 내용 DB 저장 실패: {e}")
-
-    def _save_transcript_to_file(self, room_name: str):
-        """룸의 대화 내용을 텍스트 파일로 저장합니다.
-
-        Args:
-            room_name (str): 저장할 룸의 이름
-
-        Note:
-            - 파일은 data/transcripts/ 디렉토리에 저장됨
-            - 파일명: room_{room_name}_{timestamp}.txt
-            - 포맷: [시:분:초] 이름: 메시지
-        """
-        transcripts = self.room_transcripts.get(room_name, [])
-        if not transcripts:
-            logger.info(f"[WebRTC] 룸 '{room_name}' 저장할 대화 내용 없음")
-            return
-
-        # Create data/transcripts directory if not exists
-        os.makedirs("data/transcripts", exist_ok=True)
-
-        # Generate filename with timestamp
-        end_time = datetime.now()
-        filename = f"room_{room_name}_{end_time.strftime('%Y%m%d_%H%M%S')}.txt"
-        filepath = os.path.join("data", "transcripts", filename)
-
-        # Get room start time
-        start_timestamp = self.room_start_times.get(room_name, transcripts[0].timestamp)
-        start_time = datetime.fromtimestamp(start_timestamp)
-
-        # Write to file
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                # Write header
-                f.write(f"[상담실: {room_name}]\n")
-                f.write(f"시작 시간: {start_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"종료 시간: {end_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"총 메시지 수: {len(transcripts)}\n")
-                f.write("=" * 60 + "\n\n")
-
-                # Write each transcript
-                for entry in transcripts:
-                    msg_time = datetime.fromtimestamp(entry.timestamp)
-                    time_str = msg_time.strftime('%H:%M:%S')
-                    f.write(f"{entry.nickname} [{time_str}]: {entry.text}\n")
-
-            logger.info(f"[WebRTC] 룸 '{room_name}' 대화 저장 완료: {filepath} ({len(transcripts)}개 메시지)")
-        except Exception as e:
-            logger.error(f"[WebRTC] 룸 '{room_name}' 대화 저장 실패: {e}")
 
     def set_customer_info(
         self,
