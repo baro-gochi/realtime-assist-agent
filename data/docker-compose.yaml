@@ -18,7 +18,7 @@ services:
     mem_limit: 512m
 
   redis:
-    image: redis:${REDIS_VERSION:-7-alpine}
+    image: redis/redis-stack:latest
     container_name: realtime-assist-redis
 
     ports:
@@ -27,5 +27,5 @@ services:
     volumes:
       - ./redis_data:/data
 
-    command: redis-server --appendonly yes
-    mem_limit: 256m
+    command: ["redis-stack-server", "--appendonly", "yes", "--maxmemory", "200mb", "--maxmemory-policy", "allkeys-lru"]
+    mem_limit: 512m

@@ -62,3 +62,6 @@ logs/
 
 #testing
 backend/test/*.txt
+
+# langgraph_api
+.langgraph_api/
