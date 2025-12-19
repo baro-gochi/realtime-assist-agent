@@ -150,10 +150,11 @@ export class WebRTCClient {
       clearTimeout(timeoutId);
 
       if (response.ok) {
-        this.turnServers = await response.json();
-        logger.debug('TURN credentials prefetched successfully');
-      } else {
-        logger.warn('Failed to prefetch TURN credentials, will use STUN only');
+        const data = await response.json();
+        if (Array.isArray(data)) {
+          this.turnServers = data;
+          logger.debug('ICE servers prefetched:', data.length, 'servers');
+        }
       }
     } catch (error) {
       logger.warn('Error prefetching TURN credentials:', error.message);

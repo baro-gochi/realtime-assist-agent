@@ -19,9 +19,9 @@ Architecture:
 
 Examples:
     서버 실행:
-        $ python app.py
+        $ uv run app.py
         또는
-        $ uvicorn app:app --host 0.0.0.0 --port 8000
+        $ uv run uvicorn app:app --host 0.0.0.0 --port 8000
 
     클라이언트 연결:
         ws://localhost:8000/ws
@@ -78,9 +78,8 @@ from pathlib import Path
 # Load 환경변수 로드 variables from config/.env
 load_dotenv(Path(__file__).parent / "config" / ".env")
 
-# Access password for authentication
+# 접근 비밀번호 설정
 ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "")
-
 
 async def verify_auth_header(authorization: Optional[str] = Header(None)) -> bool:
     """Authorization 헤더를 검증합니다."""
@@ -95,7 +94,6 @@ async def verify_auth_header(authorization: Optional[str] = Header(None)) -> boo
         raise HTTPException(status_code=401, detail="Invalid password")
     return True
 
-
 def verify_ws_token(token: Optional[str]) -> bool:
     """WebSocket 연결 시 토큰을 검증합니다."""
     if not ACCESS_PASSWORD:
@@ -103,7 +101,7 @@ def verify_ws_token(token: Optional[str]) -> bool:
     return token == ACCESS_PASSWORD
 
 
-# Configure logging
+# 로그 설정
 os.makedirs("logs", exist_ok=True)
 log_filename = f"logs/server_{__import__('datetime').datetime.now().strftime('%Y%m%d')}.log"
 
@@ -164,13 +162,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logger.info(f"Logging initialized: level={LOG_LEVEL}, env={ENV}")
+logger.info(f"로깅 초기화 완료: level={LOG_LEVEL}, env={ENV}")
 
-# Global managers
+
+# 글로벌 매니저 인스턴스
 peer_manager = PeerConnectionManager()
 room_manager = RoomManager()
 
-# Database and Redis managers (will be initialized in lifespan)
+# DB 매니저 및 Redis 매니저 초기화
 db_manager = get_db_manager()
 redis_manager = get_redis_manager()
 db_log_handler: Optional[DatabaseLogHandler] = None
@@ -196,55 +195,55 @@ async def lifespan(app: FastAPI):
     """
     global db_log_handler
 
-    # Startup
-    logger.info("Starting up WebRTC Signaling Server...")
+    # 서버 시작
+    logger.info("WebRTC 시그널링 서버 시작 중...")
 
     # 오래된 로그 파일 정리 (2개월 이상)
     deleted_logs = cleanup_old_logs()
     if deleted_logs > 0:
-        logger.info(f"Cleaned up {deleted_logs} old log files (>{LOG_RETENTION_DAYS} days)")
+        logger.info(f"오래된 로그 파일 {deleted_logs}개 정리 완료 ({LOG_RETENTION_DAYS}일 이상)")
 
-    # Initialize database connection
+    # 데이터베이스 연결 초기화
     db_initialized = await db_manager.initialize()
     if db_initialized:
-        logger.info("Database connection established")
+        logger.info("데이터베이스 연결 완료")
 
-        # Start database log handler
+        # 데이터베이스 로그 핸들러 시작
         db_log_handler = DatabaseLogHandler(level=logging.INFO)
         logging.getLogger().addHandler(db_log_handler)
         await db_log_handler.start()
-        logger.info("Database log handler started")
+        logger.info("데이터베이스 로그 핸들러 시작됨")
     else:
-        logger.warning("Database not available, running without DB logging")
+        logger.warning("데이터베이스 사용 불가, DB 로깅 없이 실행")
 
-    # Initialize Redis connection
+    # Redis 연결 초기화
     redis_initialized = await redis_manager.initialize()
     if redis_initialized:
-        logger.info("Redis connection established")
+        logger.info("Redis 연결 완료")
     else:
-        logger.warning("Redis not available, running without Redis")
+        logger.warning("Redis 사용 불가, Redis 없이 실행")
 
     yield
 
-    # Shutdown
-    logger.info("Shutting down server...")
+    # 서버 종료
+    logger.info("서버 종료 중...")
 
-    # Stop database log handler
+    # 데이터베이스 로그 핸들러 정지
     if db_log_handler:
         await db_log_handler.stop()
-        logger.info("Database log handler stopped")
+        logger.info("데이터베이스 로그 핸들러 정지됨")
 
-    # Close Redis connection
+    # Redis 연결 종료
     if redis_manager.is_initialized:
         await redis_manager.close()
-        logger.info("Redis connection closed")
+        logger.info("Redis 연결 종료됨")
 
-    # Close database connection
+    # 데이터베이스 연결 종료
     if db_manager.is_initialized:
         await db_manager.close()
-        logger.info("Database connection closed")
+        logger.info("데이터베이스 연결 종료됨")
 
-    # Cleanup peer connections
+    # 피어 연결 정리
     await peer_manager.cleanup_all()
 
 
@@ -306,43 +305,6 @@ async def root():
         {"status": "ok", "service": "WebRTC Signaling Server with Rooms"}
     """
     return {"status": "ok", "service": "WebRTC Signaling Server with Rooms"}
-
-
-@app.get("/rooms")
-async def get_rooms():
-    """활성화된 모든 룸의 목록을 조회합니다.
-
-    현재 서버에 생성되어 있는 모든 룸과 각 룸의 참가자 정보를 반환합니다.
-    클라이언트가 참가 가능한 룸을 확인하거나, 관리자가 시스템 상태를
-    모니터링하는 데 사용됩니다.
-
-    Returns:
-        dict: 룸 목록을 포함하는 딕셔너리
-            - rooms (List[dict]): 각 룸의 정보 리스트
-                - room_name (str): 룸 이름
-                - peer_count (int): 현재 참가자 수
-                - peers (List[dict]): 참가자 정보 리스트
-                    - peer_id (str): 참가자 고유 ID
-                    - nickname (str): 참가자 닉네임
-
-    Examples:
-        >>> response = await get_rooms()
-        >>> print(response)
-        {
-            "rooms": [
-                {
-                    "room_name": "상담실1",
-                    "peer_count": 2,
-                    "peers": [
-                        {"peer_id": "abc-123", "nickname": "상담사"},
-                        {"peer_id": "def-456", "nickname": "내담자"}
-                    ]
-                }
-            ]
-        }
-    """
-    return {"rooms": room_manager.get_room_list()}
-
 
 # STT 연동없이 택스트 시나리오로 에이전트 테스트용 API
 class ScenarioTestRequest(BaseModel):
@@ -494,7 +456,7 @@ async def get_rooms_api(_: bool = Depends(verify_auth_header)):
     프론트엔드에서 /api 경로를 통해 접근할 수 있습니다.
 
     Returns:
-        dict: 룸 목록을 포함하는 딕셔너리 (/rooms와 동일한 형식)
+        dict: 룸 목록을 포함하는 딕셔너리
     """
     return {"rooms": room_manager.get_room_list()}
 
@@ -545,98 +507,32 @@ async def get_turn_credentials(_: bool = Depends(verify_auth_header)):
     turn_credential = os.getenv("TURN_CREDENTIAL")
     stun_server_url = os.getenv("STUN_SERVER_URL")
 
-    if not turn_server_url or not turn_username or not turn_credential:
-        logger.warning("AWS coturn credentials not set in environment")
-        return {"error": "TURN service not configured"}
-
     ice_servers = []
 
-    # STUN 서버 추가 (AWS coturn)
+    # STUN 서버 추가 (커스텀 설정)
     if stun_server_url:
         ice_servers.append({"urls": stun_server_url})
 
-    # TURN 서버 추가 (AWS coturn)
-    ice_servers.append({
-        "urls": turn_server_url,
-        "username": turn_username,
-        "credential": turn_credential
-    })
+    # Google STUN 서버 (fallback)
+    ice_servers.append({"urls": "stun:stun.l.google.com:19302"})
+    ice_servers.append({"urls": "stun:stun1.l.google.com:19302"})
 
-    logger.info("AWS coturn credentials provided to frontend")
+    # TURN 서버 추가 (설정된 경우만)
+    if turn_server_url and turn_username and turn_credential:
+        ice_servers.append({
+            "urls": turn_server_url,
+            "username": turn_username,
+            "credential": turn_credential
+        })
+        logger.info("ICE 서버 제공: STUN + TURN")
+    else:
+        logger.info("ICE 서버 제공: STUN만 (TURN 미설정)")
+
     return ice_servers
-
-
-# RAG 서버 URL (환경변수로 설정 가능)
-RAG_SERVER_URL = os.getenv("RAG_SERVER_URL", "http://localhost:8001")
-
-
-class RAGAssistRequest(BaseModel):
-    """RAG 어시스턴트 요청 모델."""
-    summary: str
-    include_documents: bool = True
-    max_documents: int = 5
-
-
-@app.post("/api/rag/assist")
-async def rag_assist_proxy(
-    request: RAGAssistRequest,
-    _: bool = Depends(verify_auth_header)
-):
-    """RAG 서버로 요청을 프록시합니다.
-
-    8001번 포트의 RAG 서버로 요청을 전달하고 응답을 반환합니다.
-    이를 통해 프론트엔드는 8000번 포트만 사용하면 됩니다.
-
-    Args:
-        request: RAG 어시스턴트 요청
-            - summary: 상담 내용 요약
-            - include_documents: 관련 문서 포함 여부 (기본값: true)
-            - max_documents: 최대 문서 수 (기본값: 5)
-
-    Returns:
-        dict: RAG 서버의 응답
-
-    Raises:
-        HTTPException: RAG 서버 연결 실패 또는 오류 시
-    """
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{RAG_SERVER_URL}/consultation/assist",
-                json=request.model_dump(exclude_none=True)
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.ConnectError:
-        logger.error(f"RAG server connection failed: {RAG_SERVER_URL}")
-        raise HTTPException(
-            status_code=503,
-            detail=f"RAG 서버에 연결할 수 없습니다. ({RAG_SERVER_URL})"
-        )
-    except httpx.TimeoutException:
-        logger.error(f"RAG server timeout: {RAG_SERVER_URL}")
-        raise HTTPException(
-            status_code=504,
-            detail="RAG 서버 응답 시간 초과"
-        )
-    except httpx.HTTPStatusError as e:
-        logger.error(f"RAG server error: {e.response.status_code}")
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"RAG 서버 오류: {e.response.text}"
-        )
-    except Exception as e:
-        logger.error(f"RAG proxy error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"RAG 프록시 처리 중 오류: {str(e)}"
-        )
-
 
 # ============================================================================
 # 상담 이력 조회 API
 # ============================================================================
-
 
 @app.get("/api/consultation/sessions/{customer_id}")
 async def get_customer_sessions(
@@ -934,37 +830,6 @@ async def get_agent_sessions(
         "count": len(sessions)
     }
 
-
-@app.get("/api/rag/health")
-async def rag_health_check():
-    """RAG 서버 상태를 확인합니다.
-
-    Returns:
-        dict: RAG 서버 상태 정보
-    """
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{RAG_SERVER_URL}/health")
-            if response.status_code == 200:
-                return {
-                    "status": "ok",
-                    "rag_server": RAG_SERVER_URL,
-                    "rag_status": response.json()
-                }
-            else:
-                return {
-                    "status": "error",
-                    "rag_server": RAG_SERVER_URL,
-                    "message": f"RAG 서버 응답 코드: {response.status_code}"
-                }
-    except Exception as e:
-        return {
-            "status": "disconnected",
-            "rag_server": RAG_SERVER_URL,
-            "message": str(e)
-        }
-
-
 @app.get("/api/health/db")
 async def db_health_check():
     """PostgreSQL 데이터베이스 상태를 확인합니다.
@@ -1043,7 +908,7 @@ async def health_check():
 
 
 # ============================================================
-# Frontend Log Collection (Development Only)
+# 프론트엔드 로그 Collection
 # ============================================================
 class FrontendLogEntry(BaseModel):
     """프론트엔드 로그 엔트리."""
@@ -1064,7 +929,7 @@ FRONTEND_LOG_DIR = "logs/frontend"
 
 @app.post("/api/logs/frontend")
 async def receive_frontend_logs(request: FrontendLogRequest):
-    """프론트엔드 로그를 수신하여 파일로 저장합니다 (개발용).
+    """프론트엔드 로그를 수신하여 파일로 저장합니다.
 
     Args:
         request: 로그 엔트리 목록
@@ -1099,10 +964,10 @@ async def receive_frontend_logs(request: FrontendLogRequest):
                 line = f"{entry.timestamp} [{entry.level.upper()}] {entry.message}{context_str}\n"
                 f.write(line)
 
-        logger.debug(f"Frontend logs received: {len(request.logs)} entries")
+        logger.debug(f"프론트엔드 로그 수신: {len(request.logs)}개")
         return {"status": "ok", "count": len(request.logs)}
     except Exception as e:
-        logger.error(f"Failed to write frontend logs: {e}")
+        logger.error(f"프론트엔드 로그 저장 실패: {e}")
         raise HTTPException(status_code=500, detail="Failed to write logs")
 
 
@@ -1161,7 +1026,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             ...     }
             ... }));
     """
-    # Verify token before accepting connection
+    # 연결 수락 전 토큰 검증
     if not verify_ws_token(token):
         await websocket.close(code=4001, reason="Unauthorized")
         return
@@ -1172,15 +1037,15 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
     current_room = None
     nickname = None
 
-    logger.info(f"Peer {peer_id} connected")
+    logger.info(f"피어 {peer_id} 연결됨")
 
-    # Send peer ID to client
+    # 클라이언트에 peer ID 전송
     await websocket.send_json({
         "type": "peer_id",
         "data": {"peer_id": peer_id}
     })
 
-    # Register callback for track received event
+    # 트랙 수신 이벤트 콜백 등록
     async def on_track_received(source_peer_id: str, room_name: str, track_kind: str):
         """트랙 수신 시 호출되는 콜백 함수.
 
@@ -1196,7 +1061,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             - 트랙 전송자는 알림 대상에서 제외됨
             - PeerConnectionManager에서 on_track 이벤트 시 자동 호출됨
         """
-        logger.info(f"Track received from {source_peer_id}: {track_kind}")
+        logger.info(f"트랙 수신 - 피어: {source_peer_id}, 종류: {track_kind}")
         # 같은 방의 다른 피어들에게 renegotiation 요청
         await broadcast_to_room(
             room_name,
@@ -1212,14 +1077,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
         )
 
     peer_manager.on_track_received_callback = on_track_received
-    
-    # Register callback for ICE candidate
-    async def on_ice_candidate(source_peer_id: str, candidate):
-          # IMPORTANT: aiortc gives us the candidate object, we need to convert it
-          # The candidate string already has "candidate:" prefix, don't add it again
 
-          # Log the raw candidate object
-          logger.debug(f"Raw candidate from aiortc: sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
+    # ICE candidate 콜백 등록
+    async def on_ice_candidate(source_peer_id: str, candidate):
+          # 중요: aiortc에서 candidate 객체를 받아 변환
+          # candidate 문자열에 이미 "candidate:" 접두사가 있음
+
+          # 원본 candidate 객체 로깅
+          logger.debug(f"aiortc candidate 원본: sdpMid={candidate.sdpMid}, sdpMLineIndex={candidate.sdpMLineIndex}")
 
           candidate_dict = {
               "candidate": candidate.candidate,  # Already has "candidate:" prefix
@@ -1227,28 +1092,28 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
               "sdpMLineIndex": candidate.sdpMLineIndex
           }
 
-          logger.debug(f"Converted candidate_dict: sdpMid={candidate_dict.get('sdpMid')}")
+          logger.debug(f"변환된 candidate_dict: sdpMid={candidate_dict.get('sdpMid')}")
 
-          # Broadcast ICE candidate to ALL peers in the same room
+          # 같은 방의 모든 피어에게 ICE candidate 브로드캐스트
           room_name = peer_manager.get_peer_room(source_peer_id)
           if room_name:
-              logger.info(f"Broadcasting backend ICE candidate from {source_peer_id} to room '{room_name}'")
+              logger.info(f"백엔드 ICE candidate 브로드캐스트 - 피어: {source_peer_id}, 방: '{room_name}'")
               await room_manager.broadcast_to_room(
                   room_name,
                   {
                       "type": "ice_candidate",
                       "data": candidate_dict
                   },
-                  exclude=[]  # Send to ALL peers (including source)
+                  exclude=[]  # 모든 피어에게 전송 (소스 포함)
               )
           else:
-              # Fallback: Send to source peer only if room not found
-              logger.warning(f"Room not found for peer {source_peer_id}, sending ICE candidate to source only")
+              # 대체: 방을 찾지 못하면 소스 피어에게만 전송
+              logger.warning(f"피어 {source_peer_id}의 방을 찾을 수 없음, 소스 피어에게만 ICE candidate 전송")
               await websocket.send_json({"type": "ice_candidate", "data": candidate_dict})
 
     peer_manager.on_ice_candidate_callback = on_ice_candidate
 
-    # Register callback for STT transcript
+    # STT 전사 결과 콜백 등록
     async def on_transcript(peer_id: str, room_name: str, transcript: str, source: str = "google", is_final: bool = True):
         """STT 인식 결과를 WebSocket을 통해 전송하고 에이전트를 실행하는 콜백 함수.
 
@@ -1264,20 +1129,20 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             - 메시지 형식: {"type": "transcript", "data": {...}}
             - 최종 결과만 LangGraph 에이전트 실행
         """
-        logger.info(f"[{source.upper()}] Transcript from {peer_id} in room '{room_name}': {transcript}")
+        logger.info(f"[{source.upper()}] 전사 결과 - 피어: {peer_id}, 방: '{room_name}': {transcript}")
 
-        # Get peer info (nickname, is_customer)
+        # 피어 정보 조회 (닉네임, 고객여부)
         peer_info = room_manager.get_peer(peer_id)
         nickname = peer_info.nickname if peer_info else "Unknown"
         is_customer = peer_info.is_customer if peer_info else False
 
-        # Save transcript to room history (only for Google to avoid duplicates)
+        # 룸 히스토리에 전사 저장 (중복 방지를 위해 Google만)
         import time
         current_time = time.time()
         if source == "google":
             room_manager.add_transcript(peer_id, room_name, transcript, timestamp=current_time)
 
-        # Broadcast transcript to all peers in room (include source for comparison)
+        # 방의 모든 피어에게 전사 결과 브로드캐스트
         await broadcast_to_room(
             room_name,
             {
@@ -1288,48 +1153,45 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     "text": transcript,
                     "timestamp": current_time,
                     "source": source,
-                    "is_final": is_final  # True for final, False for partial
+                    "is_final": is_final  # True: 최종 결과, False: 부분 결과
                 }
             }
         )
 
         # LangGraph 에이전트 실행 (실시간 요약 생성)
-        # Skip agent for STT comparison room
+        # STT 비교 룸은 에이전트 실행 제외
         if room_name == "stt-comparison-room":
-            logger.debug(f"Skipping agent for STT comparison room")
+            logger.debug("STT 비교 룸에서는 에이전트 실행 생략")
             return
 
-        # Only run agent for Google STT to avoid duplicate summaries
+        # Google STT만 에이전트 실행 (중복 요약 방지)
         if source != "google":
-            logger.debug(f"Skipping agent for {source} source (only Google STT triggers agent)")
+            logger.debug(f"{source} 소스는 에이전트 실행 생략 (Google STT만 실행)")
             return
 
         try:
             agent = room_agents.get(room_name)
 
             if not agent:
-                logger.warning(f"No agent found for room '{room_name}', skipping summary")
+                logger.warning(f"방 '{room_name}'의 에이전트를 찾을 수 없음, 요약 생략")
                 return
 
             # 에이전트 실행 정책:
-            # TODO: 테스트 완료 후 주기적 실행으로 복원
-            # - 현재: 모든 최종 발화에 대해 에이전트 실행
-            # - 원래: 고객 발화는 매번, 상담사 발화는 3회에 1번
             should_run_summary = is_final  # 최종 발화면 항상 실행
 
             if is_final:
                 summary_counters[room_name] += 1
 
             logger.info(
-                f"Running agent for room '{room_name}' "
+                f"방 '{room_name}' 에이전트 실행 "
                 f"(should_run_summary={should_run_summary}, is_final={is_final}, is_customer={is_customer})"
             )
-            logger.info(f"Calling agent.on_new_transcript(peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...)")
+            logger.info(f"agent.on_new_transcript 호출 - peer_id={peer_id}, nickname={nickname}, transcript={transcript[:50]}...")
 
             turn_id = f"{room_name}-{int(current_time * 1000)}"
 
             async def handle_agent_update(chunk: dict):
-                """LangGraph node 업데이트를 즉시 WebSocket으로 브로드캐스트."""
+                """LangGraph 노드 업데이트를 즉시 WebSocket으로 브로드캐스트."""
                 try:
                     await broadcast_to_room(
                         room_name,
@@ -1341,7 +1203,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         }
                     )
                 except Exception as err:
-                    logger.error(f"Failed to broadcast agent update: {err}")
+                    logger.error(f"에이전트 업데이트 브로드캐스트 실패: {err}")
 
             # 스트리밍 모드로 에이전트 실행 (노드별 업데이트 즉시 브로드캐스트)
             result = await agent.on_new_transcript(
@@ -1357,7 +1219,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
             # 에러 체크
             if "error" in result:
-                logger.error(f"Agent returned error: {result['error']}")
+                logger.error(f"에이전트 에러 반환: {result['error']}")
                 return
 
             # 요약 실행 안 했으면 브로드캐스트 스킵
@@ -1369,8 +1231,8 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
             current_summary = result.get("current_summary", "")
             last_summarized_index = result.get("last_summarized_index", 0)
 
-            logger.info(f"Broadcasting agent update with structured summary")
-            logger.info(f"Summary: {current_summary[:100]}...")
+            logger.info("구조화된 요약으로 에이전트 업데이트 브로드캐스트")
+            logger.info(f"요약: {current_summary[:100]}...")
 
             await broadcast_to_room(
                 room_name,
@@ -1387,21 +1249,21 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     }
                 }
             )
-            logger.info(f"Broadcast completed")
+            logger.info("브로드캐스트 완료")
 
         except Exception as e:
-            logger.error(f"Agent execution failed: {e}", exc_info=True)
+            logger.error(f"에이전트 실행 실패: {e}", exc_info=True)
 
     peer_manager.on_transcript_callback = on_transcript
 
     try:
         while True:
-            # Receive message from client
+            # 클라이언트로부터 메시지 수신
             data = await websocket.receive_json()
             message_type = data.get("type")
 
             if message_type == "join_room":
-                # Handle room join
+                # 방 입장 처리
                 join_data = data.get("data", {})
                 room_name = join_data.get("room_name")
                 nickname = join_data.get("nickname", "Anonymous")
@@ -1433,7 +1295,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         customer_info = None
 
                     if customer_info:
-                        logger.info(f"Found customer '{nickname}' ({phone_number}), customer_id: {customer_info.get('customer_id')}")
+                        logger.info(f"고객 발견: '{nickname}' ({phone_number}), customer_id: {customer_info.get('customer_id')}")
                         # 먼저 고객 정보 저장 (상담 이력 조회 실패해도 고객 정보는 유지)
                         room_manager.set_customer_info(room_name, customer_info, [])
 
@@ -1442,30 +1304,30 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                             consultation_history = await customer_repo.get_consultation_history(
                                 customer_info['customer_id']
                             )
-                            logger.info(f"Found {len(consultation_history)} consultation history for customer")
+                            logger.info(f"고객의 상담 이력 {len(consultation_history)}건 발견")
                             # 상담 이력이 있으면 업데이트
                             if consultation_history:
                                 room_manager.set_customer_info(room_name, customer_info, consultation_history)
                         except Exception as e:
-                            logger.error(f"Failed to get consultation history: {e}")
+                            logger.error(f"상담 이력 조회 실패: {e}")
                             # 상담 이력 조회 실패해도 고객 정보는 이미 저장됨
                     else:
-                        logger.info(f"Customer not found: '{nickname}' ({phone_number})")
+                        logger.info(f"고객을 찾을 수 없음: '{nickname}' ({phone_number})")
 
                 # 상담사 정보 조회 (agent_code가 있는 경우 = 상담사인 경우)
                 agent_info = None
                 if agent_code:
                     agent_repo = get_agent_repository()
-                    logger.info(f"Looking up agent: code='{agent_code}', name='{nickname}', db_initialized={agent_repo.db.is_initialized}")
+                    logger.info(f"상담사 조회: code='{agent_code}', name='{nickname}', db_initialized={agent_repo.db.is_initialized}")
                     agent_info = await agent_repo.find_agent(agent_code, nickname)
-                    logger.info(f"Agent lookup result: {agent_info}")
+                    logger.info(f"상담사 조회 결과: {agent_info}")
                     if agent_info:
                         # 방에 상담사 정보 저장 (세션 저장 시 연결용)
                         room_manager.set_agent_info(room_name, agent_info)
-                        logger.info(f"Agent identified: '{nickname}' ({agent_code}), agent_id: {agent_info.get('agent_id')}")
+                        logger.info(f"상담사 식별 완료: '{nickname}' ({agent_code}), agent_id: {agent_info.get('agent_id')}")
                     else:
                         # 등록된 상담사가 없으면 에러
-                        logger.warning(f"Agent not found: '{nickname}' ({agent_code})")
+                        logger.warning(f"상담사를 찾을 수 없음: '{nickname}' ({agent_code})")
                         await websocket.send_json({
                             "type": "error",
                             "data": {"message": f"등록되지 않은 상담사입니다: {agent_code}"}
@@ -1479,12 +1341,12 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
 
                 # 방 생성/입장 시 에이전트 생성 (STT 비교 페이지는 제외)
                 if room_name == "stt-comparison-room":
-                    logger.debug(f"Skipping agent creation for STT comparison room")
+                    logger.debug("STT 비교 룸에서는 에이전트 생성 생략")
                     agent = None
                 else:
-                    logger.info(f"Creating/getting agent for room '{room_name}'")
+                    logger.info(f"방 '{room_name}'의 에이전트 생성/조회 중")
                     agent = get_or_create_agent(room_name)
-                    logger.info(f"Agent ready for room '{room_name}'")
+                    logger.info(f"방 '{room_name}'의 에이전트 준비 완료")
 
                 # 에이전트 준비 완료 알림 전송 (STT 비교 룸은 제외)
                 if agent is not None:
@@ -1529,7 +1391,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         }
                     )
 
-                # Get other peers in room
+                # 방의 다른 피어 조회
                 other_peers = room_manager.get_other_peers(room_name, peer_id)
 
                 # 상담사인 경우 기존 고객 정보 조회
@@ -1538,9 +1400,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 if not is_customer:
                     existing_customer_info, existing_consultation_history = room_manager.get_customer_info(room_name)
                     if existing_customer_info:
-                        logger.info(f"Agent joined room with existing customer: {existing_customer_info.get('customer_name')}")
+                        logger.info(f"상담사가 기존 고객과 함께 방에 입장: {existing_customer_info.get('customer_name')}")
 
-                # Send room joined confirmation
+                # 방 입장 확인 전송
                 room_joined_data = {
                     "room_name": room_name,
                     "peer_count": room_manager.get_room_count(room_name),
@@ -1594,14 +1456,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         await agent.update_session_customer(customer_info['customer_id'])
                         logger.info(f"[세션] 고객 연결 완료 - session={agent.session_id}, customer_id={customer_info['customer_id']}")
 
-                # Renegotiation will be triggered when tracks are actually received
+                # 실제 트랙 수신 시 Renegotiation 트리거됨
                 # on_track_received 콜백에서 트랙 수신 시 자동으로 renegotiation 요청됨
-                logger.info(f"Peer {peer_id} joined - will trigger renegotiation when tracks arrive")
+                logger.info(f"피어 {peer_id} 입장 완료 - 트랙 수신 시 renegotiation 트리거 예정")
 
-                logger.info(f"Peer {nickname} ({peer_id}) joined room '{room_name}'")
+                logger.info(f"피어 {nickname} ({peer_id})가 방 '{room_name}'에 입장함")
 
             elif message_type == "offer":
-                # Handle WebRTC offer
+                # WebRTC offer 처리
                 if not current_room:
                     await websocket.send_json({
                         "type": "error",
@@ -1610,14 +1472,14 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     continue
 
                 offer = data.get("data")
-                logger.info(f"Received offer from {peer_id} in room '{current_room}'")
+                logger.info(f"피어 {peer_id}로부터 offer 수신 (방: '{current_room}')")
 
                 try:
-                    # Get other peers in room
+                    # 방의 다른 피어 조회
                     other_peers = room_manager.get_other_peers(current_room, peer_id)
                     other_peer_ids = [p.peer_id for p in other_peers]
 
-                    # Handle offer and create answer
+                    # offer 처리 및 answer 생성
                     answer = await peer_manager.handle_offer(
                         peer_id,
                         current_room,
@@ -1625,22 +1487,22 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         other_peer_ids
                     )
 
-                    # Send answer back to peer
+                    # 피어에게 answer 전송
                     await websocket.send_json({
                         "type": "answer",
                         "data": answer
                     })
 
-                    logger.info(f"Sent answer to {peer_id}")
+                    logger.info(f"피어 {peer_id}에게 answer 전송 완료")
                 except Exception as e:
-                    logger.error(f"Error handling offer from {peer_id}: {e}")
+                    logger.error(f"피어 {peer_id}의 offer 처리 중 오류: {e}")
                     await websocket.send_json({
                         "type": "error",
                         "data": {"message": str(e)}
                     })
 
             elif message_type == "ice_candidate":
-                # Handle ICE candidate
+                # ICE candidate 처리
                 if not current_room:
                     await websocket.send_json({
                         "type": "error",
@@ -1649,9 +1511,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     continue
 
                 candidate_data = data.get("data")
-                logger.info(f"Received ICE candidate from {peer_id[:8]}")
+                logger.info(f"피어 {peer_id[:8]}로부터 ICE candidate 수신")
 
-                # Add ICE candidate to this peer's connection
+                # 해당 피어의 연결에 ICE candidate 추가
                 pc = peer_manager.get_peer_connection(peer_id)
                 if pc and candidate_data:
                     try:
@@ -1678,13 +1540,13 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         ice_candidate.sdpMid = sdp_mid
                         ice_candidate.sdpMLineIndex = sdp_mline_index
 
-                        # Add to peer connection
+                        # 피어 연결에 추가
                         await pc.addIceCandidate(ice_candidate)
-                        logger.info(f"  Added client ICE candidate to peer {peer_id[:8]}")
+                        logger.info(f"  피어 {peer_id[:8]}에 클라이언트 ICE candidate 추가 완료")
                     except Exception as e:
-                        logger.error(f"  Failed to add ICE candidate: {e}")
+                        logger.error(f"  ICE candidate 추가 실패: {e}")
 
-                # Broadcast ICE candidate to other peers in the room
+                # 방의 다른 피어들에게 ICE candidate 브로드캐스트
                 await broadcast_to_room(
                     current_room,
                     {
@@ -1695,19 +1557,19 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 )
 
             elif message_type == "end_session":
-                # Handle consultation session end (save to DB)
+                # 상담 세션 종료 처리 (DB 저장)
                 if current_room:
-                    logger.info(f"Ending session for room '{current_room}'")
+                    logger.info(f"방 '{current_room}'의 세션 종료 처리 중")
                     try:
                         agent = room_agents.get(current_room)
                         if agent and agent.session_id:
-                            # Get transcript count before ending session
+                            # 세션 종료 전 전사 개수 조회
                             conversation_history = agent.state.get("conversation_history", [])
                             transcript_count = len(conversation_history)
 
-                            # End the session - LLM will generate structured final summary
+                            # 세션 종료 - LLM이 구조화된 최종 요약 생성
                             success = await agent.end_session()
-                            logger.info(f"Session ended for room '{current_room}': success={success}, transcripts={transcript_count}")
+                            logger.info(f"방 '{current_room}' 세션 종료: success={success}, transcripts={transcript_count}")
 
                             await websocket.send_json({
                                 "type": "session_ended",
@@ -1719,7 +1581,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                                 }
                             })
                         else:
-                            logger.warning(f"No agent or session for room '{current_room}'")
+                            logger.warning(f"방 '{current_room}'에 에이전트 또는 세션 없음")
                             await websocket.send_json({
                                 "type": "session_ended",
                                 "data": {
@@ -1730,7 +1592,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                                 }
                             })
                     except Exception as e:
-                        logger.error(f"Error ending session for room '{current_room}': {e}")
+                        logger.error(f"방 '{current_room}' 세션 종료 중 오류: {e}")
                         await websocket.send_json({
                             "type": "session_ended",
                             "data": {
@@ -1752,9 +1614,9 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                     })
 
             elif message_type == "leave_room":
-                # Handle room leave
+                # 방 퇴장 처리
                 if current_room:
-                    # Notify others
+                    # 다른 피어들에게 알림
                     await broadcast_to_room(
                         current_room,
                         {
@@ -1768,42 +1630,42 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                         exclude=[peer_id]
                     )
 
-                    # Leave room
+                    # 방 퇴장
                     room_manager.leave_room(peer_id)
                     await peer_manager.close_peer_connection(peer_id)
 
-                    logger.info(f"Peer {nickname} ({peer_id}) left room '{current_room}'")
+                    logger.info(f"피어 {nickname} ({peer_id})가 방 '{current_room}'에서 퇴장함")
                     current_room = None
 
             elif message_type == "get_rooms":
-                # Send list of available rooms
+                # 사용 가능한 방 목록 전송
                 await websocket.send_json({
                     "type": "rooms_list",
                     "data": {"rooms": room_manager.get_room_list()}
                 })
 
             elif message_type == "text_input":
-                # Handle manual text input (for testing without STT)
+                # 수동 텍스트 입력 처리 (STT 없이 테스트용)
                 if not current_room:
-                    logger.warning(f"Peer {peer_id} tried to send text without joining a room")
+                    logger.warning(f"피어 {peer_id}가 방에 입장하지 않고 텍스트 전송 시도")
                     continue
 
                 text = data.get("data", {}).get("text", "").strip()
                 if text:
-                    logger.info(f"[TEXT_INPUT] Manual text from {peer_id}: {text}")
+                    logger.info(f"[TEXT_INPUT] 피어 {peer_id}의 수동 텍스트 입력: {text}")
                     await on_transcript(peer_id, current_room, text, source="manual", is_final=True)
 
             else:
-                logger.warning(f"Unknown message type from {peer_id}: {message_type}")
+                logger.warning(f"피어 {peer_id}로부터 알 수 없는 메시지 타입: {message_type}")
 
     except WebSocketDisconnect:
-        logger.info(f"Peer {peer_id} disconnected")
+        logger.info(f"피어 {peer_id} 연결 끊김")
     except Exception as e:
-        logger.error(f"Error in websocket connection for {peer_id}: {e}")
+        logger.error(f"피어 {peer_id}의 WebSocket 연결 중 오류: {e}")
     finally:
-        # Cleanup
+        # 정리 작업
         if current_room:
-            # Notify others in room
+            # 방의 다른 피어들에게 알림
             await broadcast_to_room(
                 current_room,
                 {
@@ -1822,7 +1684,7 @@ async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = Query(
                 summary_counters.pop(current_room, None)
 
         await peer_manager.close_peer_connection(peer_id)
-        logger.info(f"Peer {peer_id} cleaned up")
+        logger.info(f"피어 {peer_id} 정리 완료")
 
 
 async def broadcast_to_room(room_name: str, message: dict, exclude: list = None):
@@ -1879,10 +1741,10 @@ async def broadcast_to_room(room_name: str, message: dict, exclude: list = None)
             try:
                 await peer.websocket.send_json(message)
             except Exception as e:
-                logger.error(f"Error broadcasting to {peer.peer_id}: {e}")
+                logger.error(f"피어 {peer.peer_id}에 브로드캐스트 중 오류: {e}")
                 disconnected.append(peer.peer_id)
 
-    # Cleanup disconnected peers
+    # 연결 끊긴 피어 정리
     for peer_id in disconnected:
         room_manager.leave_room(peer_id)
         await peer_manager.close_peer_connection(peer_id)

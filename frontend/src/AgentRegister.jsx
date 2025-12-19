@@ -52,6 +52,10 @@ function AgentRegister({ isDarkMode, onToggleTheme }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    // 중복 제출 방지
+    if (loading) return;
+
     if (!agentCode.trim() || !agentName.trim()) {
       setError('상담사 코드와 이름을 모두 입력해주세요');
       return;
@@ -81,16 +85,19 @@ function AgentRegister({ isDarkMode, onToggleTheme }) {
 
       if (response.ok) {
         setSuccess(`등록 완료! 상담사 ID: ${data.agent_id}`);
-        setAgentCode('');
-        setAgentName('');
+        // 성공 후 이력 조회 페이지로 이동 (PRG 대안)
+        setTimeout(() => {
+          navigate('/agent/history');
+        }, 1500);
       } else {
         setError(data.detail || '등록 실패');
+        setLoading(false);
       }
     } catch (err) {
       setError('서버 연결 실패');
-    } finally {
       setLoading(false);
     }
+    // 성공 시 loading 유지하여 재제출 방지 (페이지 이동 전까지)
   };
 
   return (
