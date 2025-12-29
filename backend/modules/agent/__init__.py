@@ -112,6 +112,12 @@ from .manager import (
     room_agents,
 )
 
+# Repository
+from .repository import RoomAgentRepository
+
+# ContextManager
+from .context_manager import RoomAgentContextManager
+
 __all__ = [
     # Graph
     "create_agent_graph",
@@ -140,6 +146,10 @@ __all__ = [
     "get_or_create_agent",
     "remove_agent",
     "room_agents",
+    # Repository
+    "RoomAgentRepository",
+    # ContextManager
+    "RoomAgentContextManager",
     # Config
     "llm_config",
     "summary_llm_config",
